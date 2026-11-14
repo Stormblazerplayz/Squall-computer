@@ -1,0 +1,16 @@
+# private or machine-specific: never commit these
+workspace/
+state.json
+window.json
+*.log
+
+# binaries: build them, or restore the WebView2 files from the SDK
+*.exe
+*.dll
+*.pdb
+src.sha
+
+# editor and rescue backups of the web files
+*.bak*
+*.broken-*
+*.pre-*

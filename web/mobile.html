@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#06090e">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>Squall</title>
+<style>
+  /* Squall on Storm's phone: pair once, then the chats, live (Mobile.cs serves this from the laptop over the home Wi-Fi) */
+  :root { --bg: #06090e; --panel: rgba(255,255,255,.05); --line: rgba(255,255,255,.09); --text: #e8eef4; --muted: #8592a0; --aqua: #4fe3c1; --blue: #3d9be9; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: radial-gradient(120% 60% at 0% 0%, rgba(79,227,193,.12), transparent 60%), radial-gradient(120% 60% at 100% 100%, rgba(61,155,233,.14), transparent 60%), var(--bg); color: var(--text); font: 15px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  header .logo { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: linear-gradient(135deg, var(--aqua), var(--blue)); color: #06090e; font-weight: 800; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  header button { background: none; border: 0; color: var(--aqua); font-size: 15px; }
+  main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .pair { padding: 40px 24px; text-align: center; }
+  .pair input { width: 220px; font-size: 32px; letter-spacing: 8px; text-align: center; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  .pair p { color: var(--muted); }
+  .btn { margin-top: 16px; padding: 12px 26px; border-radius: 14px; border: 0; background: linear-gradient(135deg, var(--aqua), var(--blue)); color: #06090e; font-weight: 700; font-size: 16px; }
+  .chat-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; color: #06090e; flex: none; }
+  .chat-row .t { flex: 1; min-width: 0; }
+  .chat-row .n { font-weight: 650; }
+  .chat-row .l { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { background: #f87171; color: #fff; border-radius: 999px; font-size: 12px; padding: 1px 7px; }
+  .msgs { padding: 10px 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .m { max-width: 86%; padding: 9px 12px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .m .w { font-size: 12px; font-weight: 700; margin-bottom: 2px; }
+  .m.me { align-self: flex-end; background: linear-gradient(135deg, rgba(79,227,193,.22), rgba(61,155,233,.2)); }
+  .m.ev { align-self: center; background: none; border: 0; color: var(--muted); font-size: 12.5px; text-align: center; }
+  .typing { color: var(--muted); font-size: 13px; padding: 0 14px 6px; }
+  footer { display: flex; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  footer textarea { flex: 1; resize: none; max-height: 120px; padding: 10px 12px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+  footer button { width: 44px; border-radius: 50%; border: 0; background: linear-gradient(135deg, var(--aqua), var(--blue)); color: #06090e; font-size: 20px; font-weight: 800; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header><button id="back" class="hidden">‹ Chats</button><div class="logo">⚡</div><h1 id="title">Squall</h1></header>
+  <main id="main"></main>
+  <div class="typing hidden" id="typing"></div>
+  <footer id="composer" class="hidden"><textarea id="input" rows="1" placeholder="Message…"></textarea><button id="send">↑</button></footer>
+</div>
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  let token = localStorage.getItem('squall.token') || '', open = null, state = null, timer = 0;
+  const api = (path, body) => fetch(path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Squall-Token': token }, body: body ? JSON.stringify(body) : undefined })
+    .then(r => r.status === 401 ? (token = '', localStorage.removeItem('squall.token'), Promise.reject(new Error('pair'))) : r.json());
+
+  function pairScreen(msg) {
+    clearInterval(timer);
+    $('#title').textContent = 'Squall'; $('#back').classList.add('hidden'); $('#composer').classList.add('hidden');
+    $('#main').innerHTML = '<div class="pair"><h2>Pair your phone</h2><p>On the laptop: Squall → Settings → Phone → Turn on. Type the 6-digit code it shows.</p>' +
+      '<input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"><br><button class="btn" id="go">Pair</button><p id="pmsg">' + esc(msg || '') + '</p></div>';
+    $('#go').onclick = () => fetch('/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: $('#code').value.trim() }) })
+      .then(r => r.json()).then(d => { if (d.token) { token = d.token; localStorage.setItem('squall.token', token); start(); } else $('#pmsg').textContent = d.error || 'That didn’t work.'; })
+      .catch(() => { $('#pmsg').textContent = 'Can’t reach the laptop. Same Wi-Fi?'; });
+  }
+  function render() {
+    if (!state) return;
+    const chats = state.chats || [];
+    if (!open) {
+      $('#title').textContent = 'Squall'; $('#back').classList.add('hidden'); $('#composer').classList.add('hidden'); $('#typing').classList.add('hidden');
+      $('#main').innerHTML = chats.map(c => '<div class="chat-row" data-chat="' + esc(c.id) + '"><div class="av" style="background:' + esc(c.color || '#a78bfa') + '">' + esc((c.name || '?')[0]) + '</div><div class="t"><div class="n">' + esc(c.name) + '</div><div class="l">' + esc(c.last || '') + '</div></div>' + (c.unread ? '<span class="badge">' + c.unread + '</span>' : '') + '</div>').join('') || '<p style="padding:20px;color:var(--muted)">No chats yet.</p>';
+      return;
+    }
+    const c = chats.find(x => x.id === open);
+    if (!c) { open = null; return render(); }
+    $('#title').textContent = c.name; $('#back').classList.remove('hidden'); $('#composer').classList.remove('hidden');
+    const near = $('#main').scrollHeight - $('#main').scrollTop - $('#main').clientHeight < 80;
+    $('#main').innerHTML = '<div class="msgs">' + (c.messages || []).map(m => m.kind === 'event' ? '<div class="m ev">' + esc(m.text) + '</div>'
+      : '<div class="m' + (m.who === 'Storm' ? ' me' : '') + '">' + (m.who === 'Storm' ? '' : '<div class="w" style="color:' + esc(m.color || '#a78bfa') + '">' + esc(m.who) + '</div>') + esc(m.text) + '</div>').join('') + '</div>';
+    $('#typing').textContent = c.typing ? c.typing + ' is working…' : ''; $('#typing').classList.toggle('hidden', !c.typing);
+    if (near) $('#main').scrollTop = $('#main').scrollHeight;
+  }
+  function poll() { api('/api/state').then(d => { state = d; render(); }).catch(e => { if (e.message === 'pair') pairScreen(); }); }
+  function start() { $('#main').innerHTML = '<p style="padding:20px;color:var(--muted)">Loading…</p>'; poll(); clearInterval(timer); timer = setInterval(poll, 2000); }
+  $('#main').addEventListener('click', e => { const r = e.target.closest('[data-chat]'); if (r) { open = r.dataset.chat; render(); $('#main').scrollTop = 1e9; } });
+  $('#back').onclick = () => { open = null; render(); };
+  const sendNow = () => { const t = $('#input').value.trim(); if (!t || !open) return; $('#input').value = ''; api('/api/send', { chat: open, text: t }).then(poll).catch(() => {}); };
+  $('#send').onclick = sendNow;
+  $('#input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendNow(); } });
+  if (token) start(); else pairScreen();
+})();
+</script>
+</body>
+</html>
