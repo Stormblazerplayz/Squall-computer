@@ -1,0 +1,56 @@
+# Checks every push and pull request: the phone link and updater (C#) on Windows and Linux, and web/link.js with Node.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build SquallLink.sln -c Release
+
+      - name: Test
+        run: dotnet test SquallLink.sln -c Release --no-build --logger "console;verbosity=normal"
+
+      - name: Publish SquallSwap.exe (the updater) the way a release does
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet publish src/SquallSwap/SquallSwap.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true -p:EnableCompressionInSingleFile=true -o swap-out
+          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+          if (-not (Test-Path swap-out/SquallSwap.exe)) { throw "SquallSwap.exe wasn't made" }
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the window's scripts parse
+        run: |
+          node --check web/app.js
+          node --check web/link.js
+          node --check web/markdown.js
+
+      - name: Test web/link.js
+        run: node --test tests/web/*.test.mjs

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- SquallLink: everything the Squall app on the computer needs to talk to the Squall app on the iPhone and iPad
+       (pairing with a QR code, the v1 phone API from Squall-mobile docs/pairing.md) and to update itself from
+       GitHub Releases. Squall.exe references this project; nothing here needs Windows to build or test. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>Squall.Link</RootNamespace>
+    <AssemblyName>SquallLink</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Kestrel: a web server that needs no admin rights or URL reservations on Windows. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- QR codes (MIT licence). -->
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SquallLink.Tests" />
+  </ItemGroup>
+
+</Project>
