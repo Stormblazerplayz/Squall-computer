@@ -1982,6 +1982,54 @@
     catch (e) { return { on: false, error: e.message }; }
   }
 
+  // ---------- the Squall app on iPhone and iPad (link.js; the host's SquallLink serves the phone): what it may read and do here ----------
+  // Only Squall's real state goes to the phone. Each hook is called later, never while this file is still loading.
+  function linkMessages(c) {
+    const mi = c.kind === 'dm' ? mirrorFor(c) : null;
+    if (mi) {
+      const out = [];
+      mi.entries.forEach((e, i) => {
+        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || '') });
+        else if (e.role === 'peer' && APP_NAME_RX.test(e.from || '') && !SQ_NOTE_RX.test(e.text || ''))
+          out.push({ id: 'e' + i, who: 'Storm', kind: 'msg', text: stripBotOnly(String(e.text || '').replace(VIA_RX, '').replace(/\n\nHe[’']s watching this session live[\s\S]*$/, '')) });
+      });
+      return out;
+    }
+    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time }));
+  }
+  function linkTyping(c) {
+    const mi = c.kind === 'dm' ? mirrorFor(c) : null;
+    return [...new Set(Object.keys(S.typing[c.id] || {}).concat(mi && mirrorBusy(mi, false) ? [c.members[0]] : []))];
+  }
+  // sends text into chat c as Storm, the same as typing it there, without moving the PC to that chat; true when it went (or queued)
+  function linkSend(c, text, call) {
+    const input = $('#input');
+    const keep = { active: S.active, split: S.split, right: S.focusRight, draft: input.value, attach: S.attach };
+    S.active = c.id; S.split = null; S.focusRight = false; S.attach = [];
+    input.value = text;
+    if (call) voiceSending = true;
+    try { send(); } catch (e) { Bridge.call('log', { level: 'error', msg: 'phone send: ' + (e && e.stack || e) }).catch(() => { }); }
+    const sent = input.value !== text;   // send() empties the box when it takes the message
+    voiceSending = false;
+    S.active = keep.active; S.split = keep.split; S.focusRight = keep.right; S.attach = keep.attach;
+    input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
+    return sent;
+  }
+  if (window.SquallLinkCore) window.SquallLinkCore.wire({
+    S, Bridge, esc,
+    phoneMessages: c => linkMessages(c),
+    typingIn: c => linkTyping(c),
+    send: (c, text, call) => linkSend(c, text, call),
+    note: (c, text) => addMessage(c, { who: APP, kind: 'event', text }),
+    markRead: c => { if (c.unread) { c.unread = 0; saveSoon(); renderAll(); } },
+    clear: c => clearChat(c),
+    answer: (rid, decision) => answerApproval(rid, decision),
+    group: (name, members) => { const c = createGroup(name, members); if (c) renderAll(); return c; },
+    openSettings: () => openSettings(),
+    closeModal: () => closeModal(),
+    sfx: name => sfx(name),
+  });
+
   // "/demo farside": the team plays out a long simulated session on Farside in its own chat (Storm picked SIMULATED, 18 Oct 21:24; the
   // script is farside-demo.json, written by Obsidian from the Farside note). Nothing runs: no Claude, no usage. Stop ends it
   const demoRuns = new Set();
@@ -5343,6 +5391,7 @@
         '<div class="set-row"><span>Show the live note again</span><button class="set-btn" data-s="note"' + (S.liveNoteHidden ? '' : ' disabled') + '>Show</button></div></div>' +
       '<div class="set-sec"><div class="set-title">Obsidian</div><div class="set-row"><span>Search, read and add lines to your EVO vault</span><button class="set-btn" data-s="vault">Open vault</button></div></div>' +
       '<div class="set-sec"><div class="set-title">Phone</div><div class="set-row"><span>' + mobileText() + '</span>' + (S.mobileOn ? '<button class="set-btn" data-s="mobilecode">New code</button>' : '') + '<button class="set-btn" data-s="mobile">' + (S.mobileOn ? 'Turn off' : 'Turn on') + '</button></div></div>' +
+      (window.SquallLinkUI ? window.SquallLinkUI.settingsHTML() : '') +
       '<div class="set-sec"><div class="set-title">Look</div><div class="set-row"><span>' + (S.trueBlack !== false ? 'True black: pure black behind everything, with the same colors and motion' : 'Glass: the dark glass with the purple and blue glow behind it') + '</span><button class="set-btn" data-s="trueblack">' + (S.trueBlack !== false ? 'True black' : 'Glass') + '</button></div></div>' +
       '<div class="set-sec"><div class="set-title">Idle work</div><div class="set-row"><span>' + (S.idleWork !== false ? 'On: an idle bot with nothing on the To do list and nothing from you fixes bugs and polishes sounds and graphics in Farside (one area per bot; paused while you game or are at the PC)' : 'Off: idle bots stay idle') + '</span><button class="set-btn" data-s="idlework">' + (S.idleWork !== false ? 'On' : 'Off') + '</button></div></div>' +
       '<div class="set-sec"><div class="set-title">Sound</div><div class="set-row"><span>' + (S.sounds === 'all' ? 'All sounds: typing, sending, replies, cards and the finish ping' : S.sounds === 'ping' ? 'Just the sci-fi ping when the response you’re looking at finishes' : 'Off') + '</span><button class="set-btn" data-s="soundtest" title="Play the sound a finished reply makes">Test sound</button><button class="set-btn" data-s="sound">' + (S.sounds === 'all' ? 'All sounds' : S.sounds === 'ping' ? 'Just the ping' : 'Off') + '</button></div></div>' +
@@ -5372,6 +5421,7 @@
       const b = e.target.closest('[data-s]');
       if (!b) return;
       const what = b.dataset.s; sfx('toggle');
+      if (window.SquallLinkUI && window.SquallLinkUI.onSettings(what)) return;
       if (what === 'done') closeModal();
       else if (what === 'live') { S.liveMode = !S.liveMode; if (S.liveMode) { startLink(); startMirrors(); } else { stopLink(); stopMirrors(); } saveSoon(); renderAll(); renderBanner(); openSettings(); }
       else if (what === 'note') { S.liveNoteHidden = false; saveSoon(); renderBanner(); openSettings(); }

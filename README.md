@@ -8,17 +8,24 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 | --- | --- |
 | `web/` | The Squall window: the HTML, CSS and JavaScript that run inside a WebView2 host (`index.html`, `app.js`, `markdown.js` and the style sheets). |
 | `web/mobile.html` | The page the host serves to a phone on the home Wi-Fi: pair, then see and send chats. |
+| `src/SquallLink/` | The phone link (pairing, the phone API, voice) and the GitHub auto-updater, in C#. `src/SquallSwap/` is the small program that swaps in an update. |
+| `web/link.js` | The window's half of the phone link, and the Pair a phone screen. |
+| `tests/` | Tests: `dotnet test SquallLink.sln` and `node --test tests/web/*.test.mjs`. |
 | `team.json` | The team: each agent's role, prompt, allowed tools and memory, who leads, and the team rules. |
 
 ## What is not in this repo yet
 
-- **The native host.** `Squall.exe` (C# and WebView2) opens the window, runs the bots through the Claude Code CLI and serves phone access (`Mobile.cs`, according to the comment in `web/mobile.html`). Its source was not on the PC this repo was pushed from, so it is not here. Add it when it is found.
+- **The native host.** `Squall.exe` (C# and WebView2) opens the window, runs the bots through the Claude Code CLI and serves phone access (`Mobile.cs`, according to the comment in `web/mobile.html`). Its source was not on the PC this repo was pushed from, so it is not here. Add it as `host/Squall.csproj` when it is found: releases are built from it.
 - Binaries (`Squall.exe`, the WebView2 DLLs), the bots' `workspace/` folders, and Squall's runtime state and logs.
 - `web/farside-demo.json`, the script behind the `/demo farside` command, because it holds private project notes. Without it that command answers that there is no demo.
 - One project name and a local folder path in `web/app.js` were replaced with neutral text. The `FARSIDE` constant in the idle-bot section is a placeholder: set it to your own folder.
 
-## Phone pairing
+## Phone pairing and updates
 
-**Today** (from `web/app.js` and `web/mobile.html`): Settings, Phone, Turn on shows the PC's address and a 6-digit code that lasts 5 minutes. The phone's web page posts the code to `/api/pair` and keeps the token it gets back.
+**The iPhone and iPad app** pairs with a QR code: Settings, Squall app (iPhone and iPad), Pair a phone. The phone side is
+[Squall-mobile `docs/pairing.md`](https://github.com/Stormblazerplayz/Squall-mobile/blob/main/docs/pairing.md); the
+computer side is `src/SquallLink` (C#) and `web/link.js`. Squall also updates itself from this repo's GitHub Releases.
+How to wire both into `Squall.exe`, and how to make a release, is in [`docs/desktop-link.md`](docs/desktop-link.md).
 
-**What the iPhone and iPad app expects** is the newer v1 contract: a QR code holding `squall://pair?v=1&host=...&port=47615&code=...&name=...`, then `POST /api/v1/pair`, `GET /api/v1/hello` and `DELETE /api/v1/pair`. It is written down in [`docs/pairing.md`](https://github.com/Stormblazerplayz/Squall-mobile/blob/main/docs/pairing.md) in Squall-mobile. The desktop side of that contract, and the screen that shows the QR code, are not built yet.
+**The older phone web page** (Settings, Phone, Turn on) still works the same way: the PC's address and a 6-digit code
+for `web/mobile.html`.

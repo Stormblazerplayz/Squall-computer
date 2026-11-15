@@ -54,6 +54,7 @@
   window.addEventListener('error', function (e) { if (window.squallReady) return; try { window.chrome.webview.postMessage({ id: 999999, cmd: 'log', args: { level: 'error', msg: String(e.message) + ' @' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ':' + e.colno } }); } catch (x) { } });
 </script>
 <script src="markdown.js?v=2026.10.29.groky229.js"></script>
+<script src="link.js?v=2026.11.15.link1.js"></script>
 <script src="app.js?v=2026.10.28.groky227.js"></script>
 </body>
 </html>

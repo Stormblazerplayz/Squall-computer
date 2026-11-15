@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- SquallSwap.exe: a tiny program that swaps in a new Squall while Squall is closed, keeps a backup, and puts
+       the old version back if the new one doesn't start. Squall starts it when it updates; you never need to.
+       SwapCore.cs is shared with SquallLink (and its tests) but compiled straight in here, so this program never
+       loads a file it is about to replace. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>Squall.Link.Updates</RootNamespace>
+    <AssemblyName>SquallSwap</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\SquallLink\Updates\SwapCore.cs" Link="SwapCore.cs" />
+  </ItemGroup>
+
+</Project>

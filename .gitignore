@@ -14,3 +14,9 @@ src.sha
 *.bak*
 *.broken-*
 *.pre-*
+
+# build output
+bin/
+obj/
+dist/
+TestResults/
