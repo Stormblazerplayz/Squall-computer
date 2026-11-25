@@ -193,17 +193,43 @@
     const agents = ((view && view.agents) || []).filter(a => a && a.name);
     const ids = botIds(agents, leadOf(view));
     const chiefIds = new Set(agents.filter(a => a.lead).map(a => ids[a.name]));
-    for (const b of state.bots || []) if (chiefIds.has(b.id)) b.chief = true;
+    const projects = projectList(view);
+    const folderOf = {};
+    for (const a of agents) if (a.folder) folderOf[ids[a.name]] = projectName(projects, a.folder);
+    for (const b of state.bots || []) {
+      if (chiefIds.has(b.id)) b.chief = true;
+      if (folderOf[b.id]) b.project = folderOf[b.id];
+    }
     state.team = { size: agents.length, max: TEAM_MAX, chiefs: chiefIds.size, maxChiefs: CHIEFS_MAX, manage: !!(view && view.manage) };
+    if (view && Array.isArray(view.projects)) state.team.projects = projects.map(p => p.name);
     state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
     return state;
   }
 
-  // bot.rename { botId, name }, bot.chief { botId, on }, bot.remove { botId, confirm: the name the phone showed }.
+  // the folders under Documents\Projects that the computer listed: [{ name, path }], names unique, at most 200
+  function projectList(view) {
+    const out = [], seen = new Set();
+    for (const p of (view && Array.isArray(view.projects)) ? view.projects : []) {
+      if (!p || typeof p.name !== 'string' || typeof p.path !== 'string' || !p.name.trim() || seen.has(p.name)) continue;
+      seen.add(p.name);
+      out.push({ name: p.name.trim().slice(0, 80), path: p.path });
+      if (out.length >= 200) break;
+    }
+    return out;
+  }
+  // the project's name for a teammate's folder, or the folder's last part when it isn't one of the listed projects
+  function projectName(projects, folder) {
+    const norm = f => String(f || '').replace(/[\\/]+$/, '').toLowerCase();
+    const hit = projects.find(p => norm(p.path) === norm(folder));
+    return hit ? hit.name : String(folder).split(/[\\/]/).filter(Boolean).pop() || '';
+  }
+
+  // bot.rename { botId, name }, bot.chief { botId, on }, bot.remove { botId, confirm: the name the phone showed },
+  // bot.project { botId, project: a project's name, or "" for all of Projects }.
   // Returns null for any other action (so the usual routes handle it), else { do, ... } or { error }
   function teamRoute(view, a) {
     const type = a && typeof a.type === 'string' ? a.type : '';
-    if (type !== 'bot.rename' && type !== 'bot.chief' && type !== 'bot.remove') return null;
+    if (type !== 'bot.rename' && type !== 'bot.chief' && type !== 'bot.remove' && type !== 'bot.project') return null;
     const name = nameFor(view, String(a.botId || ''));
     if (!name) return { error: 'That teammate isn’t on the team any more.' };
     if (type === 'bot.rename') {
@@ -217,6 +243,13 @@
       if (typeof a.on !== 'boolean') return { error: 'Say whether it should be a chief.' };
       return { do: 'chief', name, on: a.on };
     }
+    if (type === 'bot.project') {
+      const want = String(a.project || '').trim();
+      if (!want) return { do: 'project', name, path: null };
+      const hit = projectList(view).find(p => p.name === want);
+      if (!hit) return { error: 'That project isn’t on the computer any more.' };
+      return { do: 'project', name, path: hit.path };
+    }
     // a screen that was open while the team changed can't remove the wrong teammate
     if (String(a.confirm || '') !== name) return { error: 'The team changed. Open the teammate again and try once more.' };
     return { do: 'remove', name };
@@ -228,13 +261,34 @@
     if (!ops) return { ok: false, error: CANT };
     if (r.do === 'chief') { await ops.chief(r.name, r.on); return { ok: true }; }
     if (r.do === 'remove') { await ops.remove(r.name); return { ok: true }; }
+    if (r.do === 'project') { if (!ops.setFolder) return { ok: false, error: CANT }; await ops.setFolder(r.name, r.path); return { ok: true }; }
     const newName = await ops.rename(r.name, r.to);
     const v = await after();
     const id = botIds((v && v.agents) || [], leadOf(v))[newName];
     return id ? { ok: true, id } : { ok: true };
   }
 
-  root.SquallTeam = { withTeam, teamRoute, teamDo, TEAM_MAX, CHIEFS_MAX };
+  // keeps the computer's project list fresh for the phone: read once, then every minute (and after a change), never more than one at a time
+  function projectCache(ops, changed) {
+    let list = null, busy = false;
+    async function load() {
+      const o = ops();
+      if (busy || !o || !o.projects) return;
+      busy = true;
+      try {
+        const next = await o.projects();
+        const fresh = projectList({ projects: next });
+        if (JSON.stringify(fresh) !== JSON.stringify(list)) { list = fresh; changed(); }
+      } catch (e) { } finally { busy = false; }
+    }
+    const t = setInterval(load, 60000);
+    if (t && t.unref) t.unref();
+    const first = setTimeout(load, 1500);
+    if (first && first.unref) first.unref();
+    return { list: () => list, load };
+  }
+
+  root.SquallTeam = { withTeam, teamRoute, teamDo, projectList, projectName, projectCache, TEAM_MAX, CHIEFS_MAX };
 
   // ---------------------------------------------------------------- the phone's state
 
@@ -504,7 +558,9 @@
     // messages set to send later (see "send later" above): the phone's state and actions see the list
     const later = laterStore(h, () => pushNow());
     const laterView = () => Object.assign(view(), { later: later.list() });
-    const phoneState = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); return withTeam(withLater(buildState(v), v), v); };
+    const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
+    const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
+    const phoneState = () => { const v = teamView(); return withTeam(withLater(buildState(v), v), v); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -603,8 +659,9 @@
       try {
         if (m.kind === 'action') {
           // Manage teammate first (bot.rename, bot.chief, bot.remove); everything else goes the usual way
-          const team = teamRoute(view(), m.body || {});
+          const team = teamRoute(teamView(), m.body || {});
           result = team ? await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); }) : await doAction(m.body || {});
+          if (team && team.do === 'project') projects.load();
         }
         else if (m.kind === 'voice') result = await doVoice(m.body || {});
         else if (m.kind === 'voiceEnd') {

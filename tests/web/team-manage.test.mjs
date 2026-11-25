@@ -75,3 +75,42 @@ test('teamDo calls the right op and gives the renamed bot its new id', async () 
   assert.deepEqual(await T.teamDo({ do: 'chief', name: 'Quill', on: true }, undefined, after), { ok: false, error: 'Squall on the computer can’t do that yet.' });
   await assert.rejects(T.teamDo({ do: 'remove', name: 'Quill' }, { remove: async () => { throw new Error('Quill is working right now.'); } }, after), /working/);
 });
+
+test('project: the list, each teammate’s project and the bot.project action', async () => {
+  const projects = [{ name: 'Squall', path: 'C:\\Users\\Storm\\Documents\\Projects\\Squall' }, { name: 'Farside', path: 'C:\\Users\\Storm\\Documents\\Projects\\Farside\\' },
+    { name: 'Squall', path: 'C:\\dupe' }, { name: '', path: 'C:\\x' }, null];
+  const v = view({ projects, agents: [{ name: 'Nova', lead: true }, { name: 'Quill', folder: 'c:\\users\\storm\\documents\\projects\\farside' }, { name: 'Rex', lead: true, folder: 'D:\\Games\\Odd' }] });
+  assert.deepEqual(T.projectList(v).map(p => p.name), ['Squall', 'Farside']);
+  const state = T.withTeam(L.buildState(v), v);
+  const byId = Object.fromEntries(state.bots.map(b => [b.id, b]));
+  assert.equal(byId.quill.project, 'Farside');
+  assert.equal(byId.rex.project, 'Odd', 'a folder outside Projects shows its own name');
+  assert.equal(byId.chief.project, undefined);
+  assert.deepEqual(state.team.projects, ['Squall', 'Farside']);
+  assert.equal(T.withTeam(L.buildState(view()), view()).team.projects, undefined, 'no list yet: the phone just shows the current project');
+
+  assert.deepEqual(T.teamRoute(v, { type: 'bot.project', botId: 'quill', project: 'Squall' }), { do: 'project', name: 'Quill', path: 'C:\\Users\\Storm\\Documents\\Projects\\Squall' });
+  assert.deepEqual(T.teamRoute(v, { type: 'bot.project', botId: 'quill', project: '' }), { do: 'project', name: 'Quill', path: null });
+  assert.equal(T.teamRoute(v, { type: 'bot.project', botId: 'quill', project: 'Nope' }).error, 'That project isn’t on the computer any more.');
+
+  const calls = [];
+  const ops = { setFolder: async (name, path) => { calls.push([name, path]); return path || ''; } };
+  assert.deepEqual(await T.teamDo({ do: 'project', name: 'Quill', path: null }, ops, async () => v), { ok: true });
+  assert.deepEqual(calls, [['Quill', null]]);
+  assert.equal((await T.teamDo({ do: 'project', name: 'Quill', path: null }, {}, async () => v)).ok, false);
+});
+
+test('projectCache reads the list once and tells about a change', async () => {
+  let reads = 0, changes = 0;
+  const ops = { projects: async () => { reads++; return [{ name: 'Squall', path: 'C:\\P\\Squall' }]; } };
+  const cache = T.projectCache(() => ops, () => changes++);
+  assert.equal(cache.list(), null);
+  await cache.load();
+  assert.deepEqual(cache.list(), [{ name: 'Squall', path: 'C:\\P\\Squall' }]);
+  await cache.load();
+  assert.equal(reads, 2);
+  assert.equal(changes, 1, 'the same list again is no change');
+  const none = T.projectCache(() => undefined, () => changes++);
+  await none.load();
+  assert.equal(none.list(), null);
+});

@@ -4720,7 +4720,23 @@
     saveSoon();
     return a.lead;
   }
-  window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief };
+  // the project a teammate works in (the right-click Project picker): the folders under Documents\Projects, and the pick saved to team.json
+  async function phoneProjects() {
+    const r = await Bridge.call('projectList', {});
+    return ((r && r.projects) || []).filter(p => p && p.name && p.path).map(p => ({ name: String(p.name), path: String(p.path) }));
+  }
+  async function phoneSetFolder(name, path) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const res = await Bridge.call('teamSetFlag', { name: a.name, key: 'folder', value: path || null });
+    a.folder = (res && res.value) || '';
+    renderTeamSoon();
+    const where = a.folder ? String(a.folder).split(/[\\/]/).filter(Boolean).pop() : '';
+    teamNote(chatById('team'), a.name + (where ? ' now works in ' + where : ' works across all of Projects again') + ' from its next run (set on the phone).');
+    saveSoon();
+    return a.folder;
+  }
+  window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief, projects: phoneProjects, setFolder: phoneSetFolder };
   // keep the chats, sessions and timers that belong to a renamed or deleted bot in step with team.json
   function migrateRename(from, to) {
     for (const c of S.chats) {
