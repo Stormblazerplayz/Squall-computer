@@ -1803,6 +1803,12 @@
     let text = input.value.trim();
     if (/^\/demo\b/i.test(text)) { input.value = ''; autosize(); clearDraft(); startDemo(text); return; }
     if (/^\/anims?\b/i.test(text)) { input.value = ''; autosize(); clearDraft(); openAnimGallery(); return; }
+    if (/^\/(pause|resume)\s*$/i.test(text)) {
+      input.value = ''; autosize(); clearDraft();
+      const on = /^\/pause/i.test(text);
+      if (!setTeamPaused(on, 'the computer')) addMessage(chat, { who: APP, kind: 'event', text: on ? 'The team is already paused. Type /resume to start it again.' : 'The team isn’t paused.' });
+      return;
+    }
     const goal = goalOf(text);
     if (goal && goal.kind === 'help') { input.value = ''; autosize(); clearDraft(); addMessage(chat, { who: APP, kind: 'event', text: 'Goals: type /goal and what you want done, for example “/goal leaderboard script tested in Studio”. “/goal done” ends it.' }); return; }
     if (goal && goal.kind === 'done') { input.value = ''; autosize(); clearDraft(); stopTimer(chat.id); addMessage(chat, { who: APP, kind: 'event', text: 'Goal marked done. The work timer is off.' }); return; }
@@ -1879,6 +1885,33 @@
     Object.keys(S.timers).forEach(id => stopTimer(id, true));
     Bridge.call('stopAll').catch(() => {});
   }
+
+  // ---------- Pause all (the phone's Mission control switch, and Siri's "Pause my team" / "Resume my team"; on the computer: the banner's
+  // Resume, or /pause and /resume). Pausing stops every bot's run, like Stop, and then nothing starts by itself until the team is resumed:
+  // no routines, wake-ups, idle work, To do drive, work timer nudges or away notes. Storm's own messages still go through. It lasts across restarts ----------
+  let teamPausedAt = 0;
+  try { teamPausedAt = Number(localStorage.getItem('squall.teamPaused')) || 0; } catch (e) { teamPausedAt = 0; }
+  function teamPaused() { return teamPausedAt > 0 && !S.selftest; }   // (the self-test runs its own routines and drive)
+  function setTeamPaused(on, from) {
+    on = !!on;
+    if (on === teamPaused()) return false;
+    teamPausedAt = on ? Date.now() : 0;
+    try { if (on) localStorage.setItem('squall.teamPaused', String(teamPausedAt)); else localStorage.removeItem('squall.teamPaused'); } catch (e) { }
+    if (on) stopAll();
+    const where = from ? ' from ' + from : '';
+    const lead = S.lead ? chatById('dm:' + S.lead.name) : null;
+    if (lead) addMessage(lead, { who: APP, kind: 'event', text: on ? '⏸ Team paused' + where + '. Nothing starts by itself until it’s resumed.' : '▶ Team resumed' + where + '. Routines, wake-ups and the To do drive are back on.' });
+    Bridge.call('log', { level: 'pause', msg: 'team ' + (on ? 'paused' : 'resumed') + where }).catch(() => {});
+    sfx(on ? 'okNo' : 'okYes');
+    renderBanner(); renderTeamSoon(); saveSoon();
+    return true;
+  }
+  function pausedFor() {
+    if (!teamPausedAt) return '';
+    const mins = Math.floor((Date.now() - teamPausedAt) / 60000);
+    return mins < 1 ? 'just now' : mins < 60 ? mins + ' min ago' : Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min ago';
+  }
+  setInterval(() => { if (teamPaused() && S.info.claudeFound) renderBanner(); }, 60000);   // keeps "paused 5 min ago" current
 
   // ---------- chats: open, create, edit ----------
   // groky r98: back/forward through the chats you opened in the left pane, like a browser. Alt+Left / Alt+Right or the mouse side buttons. No CSS, no motion.
@@ -2027,6 +2060,8 @@
     typingIn: c => linkTyping(c),
     send: (c, text, call) => linkSend(c, text, call),
     note: (c, text) => addMessage(c, { who: APP, kind: 'event', text }),
+    paused: () => teamPaused(),
+    setPaused: (on, from) => setTeamPaused(on, from),
     markRead: c => { if (c.unread) { c.unread = 0; saveSoon(); renderAll(); } },
     clear: c => clearChat(c),
     answer: (rid, decision) => answerApproval(rid, decision),
@@ -2457,7 +2492,7 @@
   }
   function wakeTick() {
     // Storm, 18 Oct: "Make the sessions not auto wake". Bots still fall asleep; Squall wakes one only when team.json has "autoWake": true
-    if (!(S.team && S.team.autoWake === true)) return;
+    if (!(S.team && S.team.autoWake === true) || teamPaused()) return;
     if (S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).length) return;   // one at a time, never while something is running or a call is on
     if (usageTight()) return;   // throttled: no waking bots while the plan is on track to run out
     const now = Date.now();
@@ -2511,7 +2546,7 @@
   }
   let idleChecking = false;
   async function idleWorkTick() {
-    if (S.idleWork === false || idleChecking || S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).some(id => { const b = S.byName[String(id).replace(/^dm:/, '')]; return !(b && b.idleJob); })) return;   // other bots' idle sessions don't block a free area
+    if (S.idleWork === false || teamPaused() || idleChecking || S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).some(id => { const b = S.byName[String(id).replace(/^dm:/, '')]; return !(b && b.idleJob); })) return;   // other bots' idle sessions don't block a free area
     if (Date.now() - Math.max(lastInput, lastTypedAt || 0) < IDLE_AWAY_MS || (S.bootAt && Date.now() - S.bootAt < IDLE_AWAY_MS)) return;   // Storm is active
     if ((TODO.items || []).some(i => i.status !== 'done')) return;   // the To do list comes first
     if (typeof usageTight === 'function' && usageTight()) return;
@@ -2532,7 +2567,7 @@
       const epoch = S.stopEpoch;
       let res = await askAgent(chat, a.name, idleNote(area[0], area[1]), epoch);
       while (Date.now() - start < IDLE_SESSION_MS - 60000) {
-        if (S.idleWork === false || stormSpoke() || S.stopEpoch !== epoch || !res) break;
+        if (S.idleWork === false || teamPaused() || stormSpoke() || S.stopEpoch !== epoch || !res) break;
         if (await Bridge.call('gameCheck').catch(() => false) === true) break;
         const left = Math.max(1, Math.round((IDLE_SESSION_MS - (Date.now() - start)) / 60000));
         const last = left <= 3;
@@ -3255,6 +3290,12 @@
         '<button class="primary" data-act="signin">Sign in</button><button data-act="recheck">I’ve signed in</button>';
       return;
     }
+    if (teamPaused()) {
+      b.className = 'banner paused';
+      b.innerHTML = '<span class="grow"><b>⏸ Team paused</b> ' + esc(pausedFor()) + '. Nothing starts by itself: no routines, wake-ups, idle work or To do drive. Your own messages still go through.</span>' +
+        '<button class="primary" data-act="resumeteam">Resume</button>';
+      return;
+    }
     if (S.liveMode && S.link.status === 'error') {
       b.className = 'banner warn';
       b.innerHTML = '<span class="grow"><b>Live link problem.</b> ' + esc(S.link.error || 'It stopped.') + ' Replies come from local stand-ins until it’s back.</span><button data-act="relink">Reconnect</button>';
@@ -3395,6 +3436,7 @@
       else if (what === 'togglelive') { S.liveMode = !S.liveMode; if (S.liveMode) { startLink(); startMirrors(); } else { stopLink(); stopMirrors(); } saveSoon(); renderAll(); renderBanner(); }
       else if (what === 'relink') { S.link.status = 'off'; startLink(); }
       else if (what === 'hidelivenote') { S.liveNoteHidden = true; saveSoon(); renderBanner(); }
+      else if (what === 'resumeteam') setTeamPaused(false, 'the computer');
       else if (what === 'timer') { if (document.querySelector('.td-pop')) closeTimerDial(); else openTimerDial(); }
       else if (what === 'settings') openSettings();
       else if (what === 'updates') openUpdateLog();
@@ -5184,7 +5226,7 @@
   // A busy bot gets it on a later tick, up to 5 minutes late.
   function routineTick(at) {
     const rs = (S.team && S.team.routines) || [];
-    if (!rs.length) return;
+    if (!rs.length || teamPaused()) return;   // paused: a routine that comes due waits (up to 5 minutes, as for a busy bot)
     const d = at instanceof Date ? at : new Date(), pad = n => String(n).padStart(2, '0');
     const nowMin = d.getHours() * 60 + d.getMinutes(), today = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()), dow = d.getDay();
     for (const r of rs) {
@@ -5811,6 +5853,7 @@
   function timerWatchTick() {
     const ids = Object.keys(S.timers);
     if (!ids.length) { clearInterval(timerWatch); timerWatch = null; return; }
+    if (teamPaused()) return;   // Pause all: a timer Storm starts while paused waits for Resume before it nudges
     for (const id of ids) {
       const t = S.timers[id], chat = chatById(id);
       if (!t || !chat || t.paused) continue;   // paused by its bot until Storm's next message
@@ -5928,6 +5971,7 @@
   }
   function driveTick() {
     if (S.selftest) return;   // the self-test drives its own chats
+    if (teamPaused()) return;   // Pause all: no To do nudges
     for (const a of (S.chiefs && S.chiefs.length ? S.chiefs : (S.lead ? [S.lead] : []))) {
       const chat = chatById('dm:' + a.name), d = driveOf(a.name);
       if (!chat || d.held || drivePaused[a.name] || S.timers[chat.id]) { d.busySeen = false; d.idleSince = 0; continue; }
@@ -5973,7 +6017,7 @@
   }
   function stormLeft() {
     if (document.hasFocus()) return;
-    if (usageTight()) return;   // throttled: the bots keep going on their own without being told
+    if (usageTight() || teamPaused()) return;   // throttled or paused: no "keep working on your own" note
     const chats = workingChats().filter(c => !S.timers[c.id] && Date.now() - (awaySaidAt[c.id] || 0) >= AWAY_GAP_MS);
     if (!chats.length) return;
     for (const c of chats) awaySaidAt[c.id] = Date.now();

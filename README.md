@@ -32,6 +32,16 @@ How to wire both into `Squall.exe`, and how to make a release, is in [`docs/desk
 **The older phone web page** (Settings, Phone, Turn on) still works the same way: the PC's address and a 6-digit code
 for `web/mobile.html`.
 
+## Pause all
+
+The phone's **Pause all** switch (Mission control) and Siri's **Pause my team** / **Resume my team** send the `team.pause`
+action (`{"paused": true}` or `{"paused": false}`). On the computer, type `/pause` or `/resume` in any chat, or press
+**Resume** on the yellow banner.
+
+Pausing stops every bot's run, like Stop, and then nothing starts by itself until the team is resumed: no routines,
+wake-ups, idle work, To do drive, work timer nudges or away notes. Your own messages still go through. The pause lasts
+across restarts. The phone gets `state.paused: true`, and every bot that isn't working or waiting on you shows as paused.
+
 ## Plan usage on the phone
 
 The usage chip under the send bar (your plan's 5-hour and weekly windows, read from Claude) also goes to the phone, in
