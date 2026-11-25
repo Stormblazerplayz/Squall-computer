@@ -2031,6 +2031,19 @@
     clear: c => clearChat(c),
     answer: (rid, decision) => answerApproval(rid, decision),
     group: (name, members) => { const c = createGroup(name, members); if (c) renderAll(); return c; },
+    // the shared To do list (TODO, further down): the phone sees it and keeps it with the same functions as the right pane
+    todo: {
+      items: () => { try { return TODO.items; } catch (e) { return []; } },   // safe before the list is set up
+      add: (text, by) => todoAdd(text, by),
+      set: (id, status, who) => {
+        if (!todoSet(id, status)) return false;
+        const it = todoFind(id);
+        if (it && who) { it.who = who; todoSave(); }
+        return true;
+      },
+      del: id => { const had = TODO.items.some(x => x.id === id); if (had) todoDel(id); return had; },
+      clearDone: () => { const n = TODO.items.length; TODO.items = TODO.items.filter(x => x.status !== 'done'); if (TODO.items.length !== n) todoSave(); return n - TODO.items.length; },
+    },
     openSettings: () => openSettings(),
     closeModal: () => closeModal(),
     sfx: name => sfx(name),

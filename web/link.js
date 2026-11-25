@@ -3,6 +3,7 @@
 // The host's SquallLink (src/SquallLink) runs the phone API from Squall-mobile docs/pairing.md. This file is the window's half:
 //   - every 2 seconds it hands the host the phone's view of the team (bots, chats, groups, approvals), built from Squall's
 //     real state: nothing here is made up, and what Squall doesn't have (routines, jobs) is simply left out;
+//   - that includes the shared To do list (Doing now, Next, Done), which the phone can add to, tick off, give to a bot or clear;
 //   - it answers the phone's actions and voice turns, which the host forwards as "linkAsk" events;
 //   - it adds "Squall app (iPhone and iPad)" to Settings, with Pair a phone (a QR code and a 6-digit code) and Unpair.
 // app.js calls SquallLinkCore.wire(hooks) once; the pure parts (buildState, routeAction, ...) are tested with Node in
@@ -99,6 +100,8 @@
     });
 
     const state = { typing, bots, chats, groups, inbox };
+    // Squall's shared To do list (workspace\\shared\\todo.json), when this Squall has one
+    if (view && Array.isArray(view.todo)) state.todo = phoneTodo(view.todo, ids, view.lead || leadName);
     // the plan's usage and today's jobs, for the phone's Plan usage screen (only when Squall has it)
     const usage = phoneUsage(view && view.usage, idOf, view && view.now);
     if (usage) state.usage = usage;
@@ -183,6 +186,52 @@
     return 'use ' + t;
   }
 
+  // ---------------------------------------------------------------- the To do list
+
+  const TODO_STATUS = ['todo', 'doing', 'done'];
+  const MAX_TODO_OPEN = 100;    // open items the phone gets
+  const MAX_TODO_DONE = 12;     // the newest finished ones, like the right pane shows
+  const MAX_TODO_TEXT = 300;
+
+  // The list as the phone sees it: { items: [{ id, text, status, by, who, botId, needs, needsBy, at, doneAt }] }.
+  // Open items keep Squall's order; the finished ones are the newest 12. A "who" that is one of the bots also gets its id,
+  // so the phone can draw its color and open its chat; anyone else (Storm, Laptop, a live session) stays a name.
+  function phoneTodo(items, ids, leadName) {
+    const idOf = name => (name && ids[name]) || null;
+    const clean = (items || []).filter(i => i && i.id && String(i.text || '').trim());
+    const open = clean.filter(i => i.status !== 'done').slice(0, MAX_TODO_OPEN);
+    const done = clean.filter(i => i.status === 'done')
+      .sort((a, b) => String(b.doneAt || b.at || '').localeCompare(String(a.doneAt || a.at || '')))
+      .slice(0, MAX_TODO_DONE);
+    return {
+      items: open.concat(done).map(i => {
+        const status = TODO_STATUS.includes(i.status) ? i.status : 'todo';
+        const out = { id: String(i.id), text: String(i.text).trim().slice(0, MAX_TODO_TEXT), status };
+        if (i.by) out.by = String(i.by).slice(0, 60);
+        if (i.who) { out.who = String(i.who).slice(0, 60); const b = idOf(i.who); if (b) out.botId = b; }
+        if (i.needs && status !== 'done') {
+          out.needs = String(i.needs).slice(0, 160);
+          const nb = idOf(i.needsBy) || idOf(i.who) || (leadName ? idOf(leadName) : null);
+          if (nb) out.needsBy = nb;
+        }
+        if (i.at) out.at = String(i.at);
+        if (i.doneAt && status === 'done') out.doneAt = String(i.doneAt);
+        return out;
+      }),
+    };
+  }
+
+  // What a bot is told when Storm gives it an item from the phone. The bots already keep the list with the squall actions
+  // todo_doing, todo_done and todo_needs (app.js TODO_RULES), so this only points at the item.
+  function giveText(item) {
+    return 'From my phone: please take this To do item [' + item.id + ']: ' + String(item.text || '').trim().slice(0, MAX_TODO_TEXT) +
+      '\nMark it with todo_doing now, do it, and close it with todo_done in the reply that says it\u2019s finished. If it needs me, mark it with todo_needs and say why.';
+  }
+
+  function todoFor(view, itemId) {
+    return ((view && view.todo) || []).find(i => i && String(i.id) === String(itemId)) || null;
+  }
+
   function phoneMessages(list, idOf) {
     const seen = {};
     return list.slice(-MAX_MESSAGES).map(m => {
@@ -257,6 +306,8 @@
         if (!names.length) return { error: 'Pick at least one bot for the group.' };
         return { do: 'group', name: String(a.name || '').trim().slice(0, 60), members: names };
       }
+      case 'todo.add': case 'todo.set': case 'todo.give': case 'todo.delete': case 'todo.clearDone':
+        return routeTodo(view, a, type);
       case 'settings.save': return { do: 'none' };
       case 'usage.settings': {
         // the phone's Plan usage screen: { throttle: true/false } and/or { limit: 10 to 100, or null for none }
@@ -278,6 +329,39 @@
       }
       default: return { error: CANT };
     }
+  }
+
+  const NO_TODO = 'Update Squall on the computer to use the To do list from your phone.';
+  const TODO_GONE = 'That to-do isn\u2019t on the list any more.';
+
+  function routeTodo(view, a, type) {
+    if (!view || !Array.isArray(view.todo)) return { error: NO_TODO };
+    if (type === 'todo.clearDone') return { do: 'todoClearDone' };
+    if (type === 'todo.add') {
+      const text = String(a.text || '').trim().replace(/\s+/g, ' ');
+      if (!text) return { error: 'Type what needs doing first.' };
+      let bot = null, chat = null;
+      if (a.botId) {
+        bot = nameFor(view, a.botId);
+        chat = bot ? chatFor(view, a.botId) : null;
+        if (!bot || !chat) return { error: 'That bot isn\u2019t on the computer any more.' };
+      }
+      return { do: 'todoAdd', text: text.slice(0, MAX_TODO_TEXT), bot, chat };
+    }
+    const item = todoFor(view, a.itemId);
+    if (!item) return { error: TODO_GONE };
+    if (type === 'todo.delete') return { do: 'todoDel', id: item.id };
+    if (type === 'todo.set') {
+      const status = String(a.status || '');
+      if (!TODO_STATUS.includes(status)) return { error: 'A to-do is todo, doing or done.' };
+      return { do: 'todoSet', id: item.id, status };
+    }
+    // todo.give
+    if (item.status === 'done') return { error: 'That one is already done.' };
+    const bot = nameFor(view, a.botId);
+    const chat = bot ? chatFor(view, a.botId) : null;
+    if (!bot || !chat) return { error: 'That bot isn\u2019t on the computer any more.' };
+    return { do: 'todoGive', id: item.id, bot, chat, text: giveText(item) };
   }
 
   // ---------------------------------------------------------------- voice calls
@@ -323,6 +407,7 @@
         })),
         approvals,
         desktop: status.update || null,
+        todo: h.todo ? h.todo.items() : undefined,
         usage: h.usage ? h.usage() : null,
         now: Date.now(),
       };
@@ -362,6 +447,34 @@
           return res && res.ok ? { ok: true } : { ok: false, error: 'That question had already gone on the computer.' };
         }
         case 'group': { const c = h.group(r.name, r.members); return c ? { ok: true, id: c.id } : { ok: false, error: 'Couldn’t make that group.' }; }
+        case 'todoAdd': {
+          const it = h.todo.add(r.text, 'Storm');
+          if (!it) return { ok: false, error: 'Couldn’t add that to-do.' };
+          let res = { ok: true, id: it.id };
+          if (r.bot) {
+            if (h.send(r.chat.raw, giveText(it), false)) h.todo.set(it.id, 'doing', r.bot);
+            else res = { ok: false, id: it.id, error: 'Added to the list, but ' + r.bot + ' is busy. Give it to ' + r.bot + ' again in a moment.' };
+          }
+          await pushNow();
+          return res;
+        }
+        case 'todoSet': {
+          if (!h.todo.set(r.id, r.status)) return { ok: false, error: TODO_GONE };
+          await pushNow();
+          return { ok: true };
+        }
+        case 'todoGive': {
+          if (!h.send(r.chat.raw, r.text, false)) return { ok: false, error: r.bot + ' is busy or Squall isn’t signed in to Claude. Try again in a moment.' };
+          h.todo.set(r.id, 'doing', r.bot);
+          await pushNow();
+          return { ok: true };
+        }
+        case 'todoDel': {
+          if (!h.todo.del(r.id)) return { ok: false, error: TODO_GONE };
+          await pushNow();
+          return { ok: true };
+        }
+        case 'todoClearDone': h.todo.clearDone(); await pushNow(); return { ok: true };
         case 'usage': {
           if (!h.setUsage) return { ok: false, error: CANT };
           const change = {};
@@ -532,7 +645,7 @@
     root.SquallLinkUI = { settingsHTML, onSettings, openPair, refresh, push };
   }
 
-  const api = { CHIEF, botIds, hash, buildState, phoneMessages, phoneUsage, windowId, routeAction, chatFor, speakable, wire };
+  const api = { CHIEF, botIds, hash, buildState, phoneMessages, phoneTodo, giveText, phoneUsage, windowId, routeAction, chatFor, speakable, wire };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SquallLinkCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
