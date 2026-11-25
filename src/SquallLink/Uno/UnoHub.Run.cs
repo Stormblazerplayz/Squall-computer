@@ -427,9 +427,11 @@ namespace Squall.Link.Uno
                 if (step % 10 == 0) _store.Save();
             }
             RaiseChanged();
+            await FlushShotAsync(cid).ConfigureAwait(false);
             try
             {
                 ContentBlockParam result;
+                UnoFrame? shotFrame = null;
                 string done = ComputerActions.Describe(a);
                 int? ex = a.X ?? a.Region?.X0, ey = a.Y ?? a.Region?.Y0;
                 switch (a.Name)
@@ -440,7 +442,7 @@ namespace Squall.Link.Uno
                             (int x, int y) cur = (0, 0);
                             try { cur = await Docker.CursorAsync(cid, ct).ConfigureAwait(false); }
                             catch (UnoToolException) { }
-                            _frames.Offer(cid, jpeg, cur.x, cur.y);
+                            shotFrame = _frames.Offer(cid, jpeg, cur.x, cur.y);
                             result = Image(c, jpeg);
                             break;
                         }
@@ -466,7 +468,11 @@ namespace Squall.Link.Uno
                         break;
                 }
                 lock (_lock) if (s.State is not ("you" or "paused")) s.Now = done;
-                LogRaw(s.Id, cid, "uno", ComputerActions.Kind(a), done, ex, ey, a.X2 ?? a.Region?.X1, a.Y2 ?? a.Region?.Y1, step);
+                string kind = ComputerActions.Kind(a);
+                var logged = LogRaw(s.Id, cid, "uno", kind, done, ex, ey, a.X2 ?? a.Region?.X1, a.Y2 ?? a.Region?.Y1, step);
+                // the replay filmstrip: Squall Uno's own screenshots, and the screen right after anything that changes it
+                if (shotFrame != null) KeepShot(s, step, logged.Seq, kind, done, shotFrame);
+                else if (ShowsOnScreen(a.Name)) ExpectShot(s, step, logged.Seq, kind, done);
                 return result;
             }
             catch (UnoToolException tex)
@@ -475,6 +481,9 @@ namespace Squall.Link.Uno
                 return Error(c, tex.Message);
             }
         }
+
+        /// <summary>Actions that change what's on the screen (the ones worth a replay picture afterwards).</summary>
+        internal static bool ShowsOnScreen(string name) => name is not ("screenshot" or "zoom" or "wait" or "cursor_position" or "mouse_move");
 
         // ===================================================================== Turning computers on
 

@@ -3088,7 +3088,7 @@
   // ---------- the Uno tab: every agent's own Squall Uno computer at a glance (the cards open the live view in the centre) ----------
   function renderUnoPane() {
     patchHTML($('#live-body'), window.SquallUnoUI ? window.SquallUnoUI.paneHTML() : '<div class="live-empty" data-k="none">Squall Uno isn’t loaded</div>');
-    $('#live-foot').innerHTML = '<span>Click a computer to watch it live and give it a task</span>';
+    $('#live-foot').innerHTML = '<span>Start a task above, or click a computer to watch it live</span>';
   }
   let unoPaneTimer = 0;
   function unoPaneSoon() {

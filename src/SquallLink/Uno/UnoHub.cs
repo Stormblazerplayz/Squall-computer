@@ -30,6 +30,11 @@ namespace Squall.Link.Uno
         public TimeSpan ComputerReadyPoll { get; set; } = TimeSpan.FromMilliseconds(500);
         /// <summary>Stop (not remove) the computers when Squall closes, so they don't use memory in the background.</summary>
         public bool StopComputersOnDispose { get; set; } = true;
+        /// <summary>How long after a click, typing or key the screen is kept for the replay filmstrip.</summary>
+        public TimeSpan ShotDelay { get; set; } = TimeSpan.FromMilliseconds(700);
+        /// <summary>Replay pictures kept per session, and for all sessions together (in memory only).</summary>
+        public int ShotsPerSession { get; set; } = 120;
+        public long ShotBytes { get; set; } = 64L * 1024 * 1024;
     }
 
     /// <summary>
@@ -51,6 +56,7 @@ namespace Squall.Link.Uno
         private readonly UnoStore _store;
         private readonly UnoEventLog _log;
         private readonly UnoFrames _frames;
+        private readonly UnoShots _shots;
         private readonly Dictionary<string, Run> _runs = new();
         private readonly Dictionary<string, DateTimeOffset> _phoneAsked = new();
         private readonly Dictionary<string, SemaphoreSlim> _gates = new();
@@ -71,6 +77,8 @@ namespace Squall.Link.Uno
         public event Action? Changed;
         /// <summary>A new frame of the computer the window watches (push "unoFrame").</summary>
         public event Action<string, UnoFrame>? WatchedFrame;
+        /// <summary>A new replay picture was kept (push "unoShot").</summary>
+        public event Action<UnoShot>? ShotAdded;
 
         public UnoHub(string folder, UnoHubOptions? options = null)
         {
@@ -88,6 +96,7 @@ namespace Squall.Link.Uno
             _store.Load(NowMs);
             _log = new UnoEventLog(NowMs);
             _frames = new UnoFrames(Docker, FramesNeeded, OnFrame, _clock, _o.FrameInterval);
+            _shots = new UnoShots(NowMs, _o.ShotsPerSession, _o.ShotBytes);
         }
 
         private long NowMs => _clock().ToUnixTimeMilliseconds();
@@ -141,6 +150,8 @@ namespace Squall.Link.Uno
                     case "check": return await CheckOp(ct).ConfigureAwait(false);
                     case "setMaxSteps": return SetMaxStepsOp(request);
                     case "watch": return WatchOp(request, fromPage);
+                    case "shots": return ShotsOp(request);
+                    case "shot": return ShotOp(request);
                     default: return Fail("Squall Uno doesn't know that request.");
                 }
             }
@@ -574,6 +585,123 @@ namespace Squall.Link.Uno
             return new JsonObject { ["ok"] = true, ["settings"] = Settings() };
         }
 
+        // ===================================================================== Replay pictures
+
+        private JsonObject ShotsOp(JsonObject req)
+        {
+            string sid = Str(req, "sessionId");
+            lock (_lock)
+            {
+                if (Session(sid) == null) throw new UnoException("That session wasn't found.");
+            }
+            var arr = new JsonArray();
+            foreach (var shot in _shots.For(sid)) arr.Add(shot.ToJson());
+            return new JsonObject { ["ok"] = true, ["sessionId"] = sid, ["shots"] = arr };
+        }
+
+        private JsonObject ShotOp(JsonObject req)
+        {
+            string sid = Str(req, "sessionId");
+            long? id = UnoSession.Long(req, "id");
+            var shot = id == null ? null : _shots.Get(sid, id.Value);
+            if (shot == null) throw new UnoException("That picture isn't kept anymore.");
+            var o = shot.ToJson();
+            o["jpeg"] = Convert.ToBase64String(shot.Jpeg);
+            return new JsonObject { ["ok"] = true, ["shot"] = o };
+        }
+
+        /// <summary>One replay picture for GET /api/v1/uno/shot (null when it isn't kept).</summary>
+        public UnoShot? Shot(string sessionId, long id) => _shots.Get(sessionId ?? "", id);
+
+        /// <summary>Keeps a replay picture and tells the window.</summary>
+        private void KeepShot(UnoSession s, int step, long eventSeq, string kind, string text, UnoFrame f)
+        {
+            var shot = _shots.Add(s.Id, s.ComputerId, step, eventSeq, f.At.ToUnixTimeMilliseconds(), kind, text, f.Jpeg, f.CursorX, f.CursorY, f.Seq);
+            if (shot == null) return;
+            try { ShotAdded?.Invoke(shot); } catch (Exception) { }
+        }
+
+        /// <summary>A click, typing or key whose "screen after" picture hasn't been kept yet (one per computer).</summary>
+        private sealed class PendingShot
+        {
+            public required UnoSession Session;
+            public required int Step;
+            public required long EventSeq;
+            public required string Kind;
+            public required string Text;
+            public required DateTimeOffset DoneAt;
+        }
+
+        private readonly Dictionary<string, PendingShot> _pendingShots = new();
+
+        /// <summary>
+        /// After a click, typing or key, the replay keeps the screen once it had time to change: the first live frame
+        /// <see cref="UnoHubOptions.ShotDelay"/> after it. If Squall Uno moves on sooner, the picture is kept when its next
+        /// action starts. If no frame comes at all (the session ended), one picture is taken.
+        /// </summary>
+        private void ExpectShot(UnoSession s, int step, long eventSeq, string kind, string text)
+        {
+            var p = new PendingShot { Session = s, Step = step, EventSeq = eventSeq, Kind = kind, Text = text, DoneAt = _clock() };
+            lock (_lock) _pendingShots[s.ComputerId] = p;
+            _ = ShotFallbackAsync(p);
+        }
+
+        /// <summary>Before the next action (or when time is up): keeps the newest frame since the last action, or takes
+        /// one picture now when no frame came since (so a quick click-then-type still shows the screen after the click).</summary>
+        private async Task FlushShotAsync(string computerId)
+        {
+            PendingShot? p;
+            lock (_lock)
+            {
+                if (!_pendingShots.Remove(computerId, out p)) return;
+            }
+            try
+            {
+                var f = _frames.Latest(computerId);
+                if (f == null || f.At < p.DoneAt)
+                {
+                    byte[] jpeg = await Docker.CaptureAsync(computerId, 80, CancellationToken.None).ConfigureAwait(false);
+                    (int x, int y) cur = (0, 0);
+                    try { cur = await Docker.CursorAsync(computerId, CancellationToken.None).ConfigureAwait(false); }
+                    catch (UnoToolException) { }
+                    lock (_lock)
+                    {
+                        if (_disposed) return;
+                    }
+                    f = _frames.Offer(computerId, jpeg, cur.x, cur.y);
+                }
+                KeepShot(p.Session, p.Step, p.EventSeq, p.Kind, p.Text, f);
+            }
+            catch (Exception) { /* a lost picture only means one fewer step in the filmstrip */ }
+        }
+
+        /// <summary>Called with every new frame: keeps it when it settles a waiting picture.</summary>
+        private void OfferShotFrame(string computerId, UnoFrame f)
+        {
+            PendingShot? p;
+            lock (_lock)
+            {
+                if (!_pendingShots.TryGetValue(computerId, out p) || f.At < p.DoneAt + _o.ShotDelay) return;
+                _pendingShots.Remove(computerId);
+            }
+            KeepShot(p.Session, p.Step, p.EventSeq, p.Kind, p.Text, f);
+        }
+
+        private async Task ShotFallbackAsync(PendingShot p)
+        {
+            try
+            {
+                await Task.Delay(_o.ShotDelay + _o.ShotDelay + TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+                string cid = p.Session.ComputerId;
+                lock (_lock)
+                {
+                    if (_disposed || !_pendingShots.TryGetValue(cid, out var now) || now != p) return;
+                }
+                await FlushShotAsync(cid).ConfigureAwait(false);
+            }
+            catch (Exception) { }
+        }
+
         private JsonObject WatchOp(JsonObject req, bool fromPage)
         {
             if (!fromPage) return Fail("Only the Squall window can watch a computer this way. Use the frame address instead.");
@@ -636,6 +764,7 @@ namespace Squall.Link.Uno
                 watched = _watched == computerId;
             }
             if (watched) RaiseWatchedFrame(computerId, f);
+            OfferShotFrame(computerId, f);
         }
 
         private void RaiseWatchedFrame(string computerId, UnoFrame f)
@@ -813,7 +942,7 @@ namespace Squall.Link.Uno
         private void Log(UnoSession s, string who, string kind, string text, ComputerAction? a = null, int? step = null)
             => LogRaw(s.Id, s.ComputerId, who, kind, text, a?.X ?? a?.Region?.X0, a?.Y ?? a?.Region?.Y0, a?.X2 ?? a?.Region?.X1, a?.Y2 ?? a?.Region?.Y1, step);
 
-        private void LogRaw(string? sessionId, string computerId, string who, string kind, string text, int? x, int? y, int? x2, int? y2, int? step)
+        private UnoEvent LogRaw(string? sessionId, string computerId, string who, string kind, string text, int? x, int? y, int? x2, int? y2, int? step)
         {
             var e = _log.Add(new UnoEvent
             {
@@ -821,6 +950,7 @@ namespace Squall.Link.Uno
                 Text = ComputerActions.Short(text, 2000), X = x, Y = y, X2 = x2, Y2 = y2, Step = step,
             });
             try { EventAdded?.Invoke(e); } catch (Exception) { }
+            return e;
         }
 
         private void RaiseChanged()

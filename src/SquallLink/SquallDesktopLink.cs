@@ -62,6 +62,7 @@ namespace Squall.Link
             Uno.EventAdded += e => Page.Tell("uno", new JsonObject { ["ev"] = e.ToJson() });
             Uno.Changed += () => Page.Tell("unoState", Uno.PushState());
             Uno.WatchedFrame += (id, f) => Page.Tell("unoFrame", UnoHub.FrameJson(id, f));
+            Uno.ShotAdded += shot => Page.Tell("unoShot", new JsonObject { ["shot"] = shot.ToJson() });
         }
 
         /// <summary>Connects the Squall window. post must be safe to call from any thread (dispatch to the UI thread).</summary>

@@ -95,6 +95,8 @@ answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain se
 | `check` | – | `{ ok, text, settings }` — asks Anthropic for the model's details (free) and checks Docker; `text` is plain sentences saying what works and what to fix |
 | `setMaxSteps` | `value` (10–300) | `{ ok, settings }` |
 | `watch` | `computerId` or null (window only) | `{ ok }` — the window gets live frames for that computer |
+| `shots` | `sessionId` | `{ ok, sessionId, shots[] }` — that session's replay pictures (Shot objects, oldest first, no pictures in them) |
+| `shot` | `sessionId`, `id` | `{ ok, shot }` — one Shot with `jpeg` (base64) added; `{ok:false}` once it isn't kept anymore |
 
 ### Live frames
 
@@ -108,6 +110,34 @@ answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain se
 - Window: after `watch`, the page gets pushes `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}`
   (see Pushes below), starting with the newest frame right away if there is one. `watch` with `computerId: null` stops.
 
+### Replay pictures (the filmstrip)
+
+While a session runs, Squall keeps real pictures of the screen so you can scrub back through it: every screenshot
+Squall Uno takes, and the screen right after each click, drag, typing, key or scroll (the first live frame about
+0.7 s later, or one picture taken when Squall Uno moves on sooner or the session ends). They live in memory only (gone
+after Squall restarts): each session keeps its newest 120, and all sessions together stay under 64 MB, dropping the
+oldest pictures of the session used longest ago first.
+
+```jsonc
+// Shot
+{ "id": 1764000000123, "sessionId": "uno-…", "computerId": "pc-chief", "step": 4, "seq": 101,   // the event it shows
+  "at": 1764000000000, "kind": "click", "text": "Clicked at (412, 230)",
+  "width": 1280, "height": 800, "cursorX": 412, "cursorY": 230, "bytes": 84213 }
+```
+
+- Phone: `GET /api/v1/uno/shot?session=<sessionId>&id=<id>` (bearer token) answers `200 image/jpeg` with headers
+  `X-Uno-Step`, `X-Uno-Width`, `X-Uno-Height`, `X-Uno-Cursor`, or `404 {error:"no_shot"}`. A kept picture never
+  changes, so the phone may cache it.
+- Window: the `shot` op, and a push for every new one (below).
+
+**Save replay** (in the filmstrip's header and in the replay bar) saves the shown task's pictures as one animated
+GIF, made entirely in the window by `web/gif.js` (no host op, nothing uploaded): each kept picture becomes a frame,
+scaled to at most 800 px wide, with the pointer ring and a caption strip (`Step 7 · Clicked at (412, 230)`, and
+`7 of 12`). Frames show for 0.9 s, the last for 2.5 s, and the GIF loops. Each frame has its own palette of its 255
+most used colors, and after the first only the part that changed is written, which keeps it small. The button shows
+`Making GIF… 4/12` while it works, then the file downloads as `squall-uno-<agent>-<yyyy-mm-dd-hhmm>.gif` (when the
+task started, local time). Pictures that aren't kept anymore are left out, and the window says how many.
+
 ### Pushes to the window
 
 These use the existing `Page.Tell(name, payload)`, which posts `{"event": name, ...payload}` to the page (the same
@@ -119,6 +149,7 @@ carries the name, no payload has a key called `event`:
   changes (sessions newest first, max 30).
 - `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}` for each new
   frame of the computer the window watches (see `watch`).
+- `{"event":"unoShot","shot":{…Shot}}` for every new replay picture (without the picture; get it with `shot`).
 
 ## How a session runs
 
