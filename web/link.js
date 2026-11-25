@@ -72,6 +72,8 @@
       const b = { id: ids[a.name], name: a.name, color: /^#[0-9a-fA-F]{6}$/.test(a.color || '') ? a.color : '#A78BFA', role: a.role || (a.name === leadName ? 'Team lead' : ''), status, unread: dm ? Math.max(0, dm.unread | 0) : 0 };
       const task = String(a.activity || '').trim();
       if (task && task !== 'Ready') b.task = task.slice(0, 200);
+      // the steps of the run it's on now, for the Board's Steps and Mission control (only while it works or waits on Storm)
+      if (status === 'working' || status === 'waiting') { const log = phoneBotLog(a); if (log.length) b.log = log; }
       return b;
     });
     // Chief first, then the order Squall shows
@@ -217,6 +219,52 @@
       out.today = { day: t.day, bots };
     }
     return out;
+  }
+
+  // A bot's current run as short lines, oldest first, the last 6: "$ npm test" for a command, "Edited app.js", "Read README.md",
+  // "Searched the web for …". Squall's own runs keep their tools on a.turns; a live session's are on a.liveSteps
+  const MAX_LOG = 6;
+  const baseName = p => String(p || '').split(/[\\/]/).filter(Boolean).pop() || '';
+  function stepLine(tool) {
+    const name = String((tool && tool.name) || '').trim(), i = (tool && tool.input) || {};
+    const one = (s, n) => { const t = String(s || '').split('\n')[0].trim(); return t.length > n ? t.slice(0, n - 1).trimEnd() + '…' : t; };
+    let line;
+    if (/^bash$/i.test(name)) line = i.command ? '$ ' + one(i.command, 120) : 'Ran a command';
+    else if (/^(edit|multiedit|notebookedit)$/i.test(name)) line = 'Edited ' + (baseName(i.file_path || i.notebook_path) || 'a file');
+    else if (/^write$/i.test(name)) line = 'Wrote ' + (baseName(i.file_path) || 'a file');
+    else if (/^read$/i.test(name)) line = 'Read ' + (baseName(i.file_path) || 'a file');
+    else if (/^(grep|glob)$/i.test(name)) line = i.pattern ? 'Searched for ' + one(i.pattern, 60) : 'Searched the files';
+    else if (/^websearch$/i.test(name)) line = i.query ? 'Searched the web for ' + one(i.query, 80) : 'Searched the web';
+    else if (/^webfetch$/i.test(name)) { let host = ''; try { host = new URL(String(i.url || '')).hostname; } catch (e) { } line = host ? 'Opened ' + host : 'Opened a web page'; }
+    else if (/^(task|agent)$/i.test(name)) line = 'Started a helper' + (i.description ? ': ' + one(i.description, 80) : '');
+    else if (/^todowrite$/i.test(name)) line = 'Updated its plan';
+    else if (name) line = 'Used ' + name.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ');
+    else return '';
+    if (tool.status === 'error' && line[0] !== '$') line += ' (failed)';
+    return line;
+  }
+  function phoneBotLog(a) {
+    const out = [];
+    for (const t of (a && Array.isArray(a.turns) ? a.turns : []))
+      for (const tool of (t && Array.isArray(t.tools) ? t.tools : [])) { const l = stepLine(tool); if (l) out.push(l); }
+    // a live Claude app session keeps its steps on a.liveSteps (app.js sets it from the session's mirror): { name, detail }
+    if (!out.length && a && Array.isArray(a.liveSteps))
+      for (const s of a.liveSteps) { const l = stepLine(liveTool(s)); if (l) out.push(l); }
+    return out.slice(-MAX_LOG);
+  }
+  // a live session's step has one detail string (the command, the file, the search) where Squall's own runs have the tool's input
+  function liveTool(s) {
+    const name = String((s && s.name) || ''), d = String((s && s.detail) || '').trim(), input = {};
+    if (d) {
+      if (/^bash$/i.test(name)) input.command = d;
+      else if (/^(edit|multiedit|write|read)$/i.test(name)) input.file_path = d;
+      else if (/^notebookedit$/i.test(name)) input.notebook_path = d;
+      else if (/^(grep|glob)$/i.test(name)) input.pattern = d;
+      else if (/^websearch$/i.test(name)) input.query = d;
+      else if (/^webfetch$/i.test(name)) input.url = d;
+      else if (/^(task|agent)$/i.test(name)) input.description = d;
+    }
+    return { name, input, status: s && s.failed ? 'error' : '' };
   }
 
   function toolWords(tool) {
