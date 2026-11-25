@@ -120,10 +120,36 @@
     if (d && d.current) {
       state.desktop = { version: String(d.current), updating: !!d.busy };
       if (d.ready) state.desktop.latest = String(d.ready);
+      // and the Claude Code that Squall runs (the phone shows both under Settings > Computer), once a run has reported its version
+      const cc = phoneClaudeCode(view && view.claudeCode);
+      if (cc) state.claudeCode = cc;
     }
     if (paused) state.paused = true;   // the phone's Pause all switch
     state.version = hash(JSON.stringify(state));
     return state;
+  }
+
+  // ---------------------------------------------------------------- Claude Code's version
+
+  // "2.1.3 (Claude Code)" -> [2, 1, 3]; null when it isn't a version
+  function versionParts(v) {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v || '').trim());
+    return m ? [+m[1], +m[2], +m[3]] : null;
+  }
+  function newerVersion(a, b) {   // is a newer than b?
+    const x = versionParts(a), y = versionParts(b);
+    if (!x || !y) return false;
+    for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+    return false;
+  }
+  // cc: { version, latest } from app.js. The phone's claudeCode: { version, latest?, needsUpdate }
+  function phoneClaudeCode(cc) {
+    const v = cc && versionParts(cc.version);
+    if (!v) return null;
+    const out = { version: v.join('.'), needsUpdate: false };
+    const latest = versionParts(cc.latest);
+    if (latest && newerVersion(cc.latest, cc.version)) { out.latest = latest.join('.'); out.needsUpdate = true; }
+    return out;
   }
 
   // ---------------------------------------------------------------- plan usage
@@ -333,6 +359,7 @@
         if (!text) return { error: 'There’s nothing to send.' };
         return { do: 'send', chat: c, text: text.slice(0, 20000) };
       }
+      case 'chief.retry': return { do: 'chiefRetry' };   // the phone's Try again on Chief's error card
       case 'chat.read': {
         const c = chatFor(view, a.chatId);
         return c ? { do: 'read', chat: c } : { do: 'none' };
@@ -590,6 +617,7 @@
         // a teammate asleep in Squall shows as napping on the phone
         agents: (S.agents || []).map(a => (h.isSleeping && a && h.isSleeping(a) ? Object.assign({}, a, { napping: true }) : a)),
         lead: S.lead ? S.lead.name : null,
+        claudeCode: h.claudeCode ? h.claudeCode() : null,
         chats: (S.chats || []).map(c => ({
           id: c.id, kind: c.kind, name: c.name, members: c.members || [], unread: c.unread || 0,
           messages: h.phoneMessages(c), typing: h.typingIn(c), raw: c,
@@ -631,6 +659,13 @@
       const chat = r.chat && r.chat.raw;
       switch (r.do) {
         case 'send': return h.send(chat, r.text, false) ? { ok: true } : { ok: false, error: 'Squall couldn’t send that. Is it signed in to Claude?' };
+        case 'chiefRetry': {
+          if (!h.retryChief) return { ok: false, error: CANT };
+          const res = h.retryChief();
+          if (res !== true) return { ok: false, error: typeof res === 'string' ? res : 'Squall couldn’t try that again.' };
+          await pushNow();
+          return { ok: true };
+        }
         case 'read': h.markRead(chat); return { ok: true };
         case 'workStop': case 'workPause': {
           if (!h.work) return { ok: false, error: CANT };

@@ -369,6 +369,7 @@
     if (!run || !a) return;
     let o;
     try { o = JSON.parse(m.line); } catch (e) { run.out.push(m.line); return; }
+    if (o.type === 'system' && o.subtype === 'init' && o.claude_code_version) claudeCodeSeen(o.claude_code_version);   // (for the phone's Settings > Computer)
     if (o.type === 'system' && o.subtype === 'init') { if (o.session_id) run.sessionId = o.session_id; if (o.model) a.model = o.model; a.activity = 'Thinking…'; }
     else if (o.type === 'system' && o.subtype === 'compact_boundary') { a.compactedAt = Date.now(); S.compacts[a.name] = a.compactedAt; saveSoon(); }   // Claude Code really compacted
     else if (o.type === 'stream_event') onStream(a, o.event);
@@ -2064,6 +2065,8 @@
     paused: () => teamPaused(),
     setPaused: (on, from) => setTeamPaused(on, from),
     markRead: c => { if (c.unread) { c.unread = 0; saveSoon(); renderAll(); } },
+    retryChief: () => phoneRetryChief(),
+    claudeCode: () => claudeCodeForPhone(),
     clear: c => clearChat(c),
     work: { list: () => workForPhone(), stop: name => phoneStopJob(name), pause: (name, on) => phonePauseJob(name, on) },
     answer: (rid, decision) => answerApproval(rid, decision),
@@ -3807,6 +3810,57 @@
 
   // error bubbles: shown for a few minutes in a live chat, and dismissed with ×
   const ERROR_SHOW_MS = 3 * 60000;
+  // The phone's Try again on Chief's error card (chief.retry): like the ↻ Try again button here, Storm's last message to Chief goes again.
+  // Only when Chief's newest reply really failed, and not while Chief is busy
+  function phoneRetryChief() {
+    const lead = S.lead, c = lead && chatById('dm:' + lead.name);
+    if (!c) return 'Chief isn’t on the computer.';
+    if (S.flows[c.id]) return lead.name + ' is already working on it.';
+    let i = c.messages.length - 1;
+    while (i >= 0 && c.messages[i].kind === 'event') i--;
+    const err = i >= 0 ? c.messages[i] : null;
+    if (!err || err.kind !== 'error' || err.who !== lead.name) return 'There’s nothing to try again: ' + lead.name + '’s last reply didn’t fail.';
+    const mine = c.messages.slice(0, i).reverse().find(x => x.who === 'Storm' && x.kind === 'user' && x.text);
+    if (!mine) return 'There’s no message of yours to send again.';
+    if (!linkSend(c, mine.text, false)) return 'Squall couldn’t send it again. Is it signed in to Claude?';
+    dismissMessage(err.id);
+    return true;
+  }
+
+  // ---------- the Claude Code version, for the phone's Settings > Computer and Chief's error card: the version each run reports when it
+  // starts, and the newest one on npm, checked every 6 hours. Nothing is guessed: no version until a run has reported one ----------
+  const CLAUDE_LATEST_MS = 6 * 3600000;
+  const claudeCodeInfo = { version: '', latest: '', checkedAt: 0 };
+  try { Object.assign(claudeCodeInfo, JSON.parse(localStorage.getItem('squall.claudeCode') || '{}') || {}); } catch (e) { }
+  function claudeCodeSave() { try { localStorage.setItem('squall.claudeCode', JSON.stringify(claudeCodeInfo)); } catch (e) { } }
+  function claudeCodeSeen(v) {
+    v = String(v || '').trim().slice(0, 40);
+    if (!/^\d+\.\d+\.\d+/.test(v)) return;
+    if (v !== claudeCodeInfo.version) { claudeCodeInfo.version = v; claudeCodeSave(); }
+    claudeLatestCheck();   // (at most every 6 hours)
+  }
+  let claudeLatestBusy = false;
+  async function claudeLatestCheck(force) {
+    if (claudeLatestBusy || S.selftest || S.mock || !claudeCodeInfo.version) return;
+    if (!force && Date.now() - claudeCodeInfo.checkedAt < CLAUDE_LATEST_MS) return;
+    claudeLatestBusy = true;
+    try {
+      const r = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', { cache: 'no-store' });
+      const j = r.ok ? await r.json() : null;
+      if (j && /^\d+\.\d+\.\d+/.test(String(j.version || ''))) { claudeCodeInfo.latest = String(j.version).slice(0, 40); claudeCodeInfo.checkedAt = Date.now(); claudeCodeSave(); }
+    } catch (e) { /* offline: try again on the next check */ }
+    finally { claudeLatestBusy = false; }
+  }
+  setInterval(() => claudeLatestCheck(), 30 * 60000);
+  function claudeCodeAboutHTML() {
+    const v = claudeCodeInfo.version;
+    if (!v) return '';
+    const n = x => (/^(\d+)\.(\d+)\.(\d+)/.exec(x || '') || []).slice(1).map(Number);
+    const l = claudeCodeInfo.latest, a = n(l), b = n(v);
+    const newer = a.length === 3 && b.length === 3 && (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
+    return '<div class="set-note">Claude Code ' + esc(v) + (newer ? ' · ' + esc(l) + ' is out: run <code>claude update</code> in a terminal' : '') + '</div>';
+  }
+  function claudeCodeForPhone() { return claudeCodeInfo.version ? { version: claudeCodeInfo.version, latest: claudeCodeInfo.latest || '' } : null; }
   // "Try again" on a teammate's failed reply: Storm's last message in this chat goes again, to the same teammate. Whatever he has
   // typed in the box meanwhile (and any attachments) stays there
   function retryFrom(id) {
@@ -5770,7 +5824,7 @@
       '<div class="set-sec"><div class="set-title">Workspace and sign-in</div>' +
         '<div class="set-row"><span>Where the agents keep their files</span><button class="set-btn" data-s="folder">' + ICON.folder + 'Open folder</button></div>' +
         '<div class="set-row"><span>' + (S.signedIn === false ? 'Not signed in to Claude yet' : S.signedIn ? 'Signed in to Claude' : 'Sign-in not checked yet') + '</span><span class="set-btns"><button class="set-btn" data-s="signin">Sign in</button><button class="set-btn" data-s="recheck">Check again</button></span></div></div>' +
-      '<div class="set-sec set-about"><div class="set-title">About</div><div>' + esc(APP) + ' ' + esc((S.info && S.info.version) || '') + '</div>' + recentUpdatesHTML() + '<div class="set-note">' + esc((S.info && S.info.workDir) || '') + '</div></div>' +
+      '<div class="set-sec set-about"><div class="set-title">About</div><div>' + esc(APP) + ' ' + esc((S.info && S.info.version) || '') + '</div>' + claudeCodeAboutHTML() + recentUpdatesHTML() + '<div class="set-note">' + esc((S.info && S.info.workDir) || '') + '</div></div>' +
       '</div>';
     document.body.append(box);
     Bridge.call('voiceStatus').then(t => { const el = box.querySelector('#set-vstatus'); if (el) el.textContent = String(t || ''); }).catch(() => { });

@@ -15,6 +15,13 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 | `tests/` | Tests: `dotnet test SquallLink.sln` and `node --test tests/web/*.test.mjs`. |
 | `team.json` | The team: each agent's role, prompt, allowed tools and memory, who leads, and the team rules. |
 
+## Chief's error card on the phone
+
+When Chief's reply fails, the phone's **Try again** (`chief.retry`) sends Storm's last message to Chief again, like the
+↻ Try again button in Squall. It only works when Chief's newest reply really failed and Chief isn't busy; otherwise the phone
+says why. The phone's Settings > Computer also shows the **Claude Code version** (`state.claudeCode`), as reported by Squall's
+own runs, and offers an update when npm has a newer one. Squall's Settings > About shows the same, with the command to update.
+
 ## What is not in this repo yet
 
 - **The native host.** `Squall.exe` (C# and WebView2) opens the window, runs the bots through the Claude Code CLI and serves phone access (`Mobile.cs`, according to the comment in `web/mobile.html`). Its source was not on the PC this repo was pushed from, so it is not here. Add it as `host/Squall.csproj` when it is found: releases are built from it.
