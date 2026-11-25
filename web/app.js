@@ -5727,6 +5727,12 @@
     },
   };
 
+  // Shared clipboard from the phone (docs/phone-clipboard.md): text only, and only when the phone asks.
+  window.SquallClipOps = {
+    read: () => Bridge.call('clipboardRead', {}),
+    write: text => Bridge.call('clipboardWrite', { text: String(text || '') }).then(() => true),
+  };
+
   function startTimer(chat, forced) {
     const v = forced || S.workFor;
     stopTimer(chat.id, true);

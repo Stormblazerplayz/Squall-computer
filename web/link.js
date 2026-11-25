@@ -707,6 +707,54 @@
 
   root.SquallSummaries = { summaryRoute, summaryDesk, withSummaries, messageById, catchUpText, phoneIdsOf, SUM_MIN, CATCH_MAX };
 
+  // ---------------------------------------------------------------- shared clipboard (docs/phone-clipboard.md)
+
+  // clip.send { text } puts text on the computer's clipboard. clip.get reads the computer's clipboard; the text comes in the next state
+  // as state.clipboard { text, at, cut } and leaves after 2 minutes or on clip.clear, so it isn't sent around longer than needed.
+  const CLIP_MAX = 20000, CLIP_KEEP = 2 * 60000;
+
+  // null when it isn't a clipboard action; { error } or { do: 'send' | 'get' | 'clear', text }
+  function clipRoute(a) {
+    if (!a || (a.type !== 'clip.send' && a.type !== 'clip.get' && a.type !== 'clip.clear')) return null;
+    if (a.type === 'clip.get') return { do: 'get' };
+    if (a.type === 'clip.clear') return { do: 'clear' };
+    if (typeof a.text !== 'string' || !a.text.trim()) return { error: 'There’s nothing to send.' };
+    if (a.text.length > CLIP_MAX) return { error: 'That’s too long for the clipboard from the phone (20,000 characters at most).' };
+    return { do: 'send', text: a.text };
+  }
+
+  // ops(): window.SquallClipOps { read() -> text, write(text) }
+  function clipDesk(ops, now) {
+    let st = null;
+    async function run(r) {
+      if (r.error) return { ok: false, error: r.error };
+      if (r.do === 'clear') { st = null; return { ok: true }; }
+      const o = ops();
+      if (!o) return { ok: false, error: CANT };
+      if (r.do === 'send') {
+        const done = await o.write(r.text);
+        return done === false ? { ok: false, error: 'Squall couldn’t use the computer’s clipboard.' } : { ok: true };
+      }
+      const text = String((await o.read()) || '');
+      if (!text.trim()) { st = null; return { ok: false, error: 'The computer’s clipboard has no text on it.' }; }
+      st = { text: text.slice(0, CLIP_MAX), cut: text.length > CLIP_MAX, at: now() };
+      return { ok: true };
+    }
+    return {
+      run,
+      view: () => (st && now() - st.at < CLIP_KEEP ? st : null),
+    };
+  }
+
+  // state.clipboard: {} when nothing was asked for, so the phone knows this computer has the feature
+  function withClipboard(state, clip) {
+    state.clipboard = clip ? { text: clip.text, at: new Date(clip.at).toISOString(), cut: !!clip.cut } : {};
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  root.SquallClip = { clipRoute, clipDesk, withClipboard, CLIP_MAX, CLIP_KEEP };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -982,11 +1030,13 @@
     const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
     const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
     const notes = notesDesk(() => root.SquallNotesOps, () => Date.now());
+    const clip = clipDesk(() => root.SquallClipOps, () => Date.now());
     const summaries = summaryDesk(() => root.SquallSummaryOps, () => { pushNow(); }, () => Date.now());
     const phoneState = () => {
       const v = teamView();
       const state = withTimers(withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps);
-      return root.SquallSummaryOps ? withSummaries(state, summaries.view()) : state;
+      const withSum = root.SquallSummaryOps ? withSummaries(state, summaries.view()) : state;
+      return root.SquallClipOps ? withClipboard(withSum, clip.view()) : withSum;
     };
 
     // what the phone sees, read from Squall's state each time
@@ -1092,12 +1142,14 @@
           const model = team || note || photo ? null : modelRoute(m.body || {}, root.SquallModelOps);
           const timer = team || note || photo || model ? null : timerRoute(view(), m.body || {});
           const sum = team || note || photo || model || timer ? null : summaryRoute(view(), m.body || {});
+          const clipAsk = team || note || photo || model || timer || sum ? null : clipRoute(m.body || {});
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
           else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
           else if (model) { result = modelDo(model, root.SquallModelOps); await pushNow(); }
           else if (timer) { result = timerDo(timer, root.SquallTimerOps); await pushNow(); }
           else if (sum) { result = summaries.run(sum); await pushNow(); }
+          else if (clipAsk) { result = await clip.run(clipAsk); await pushNow(); }
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }
