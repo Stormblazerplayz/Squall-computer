@@ -39,3 +39,11 @@ the pace lands, and the jobs each bot did today (Squall times its own runs, from
 Both the phone and the usage menu have **Slow the team down to save usage** (the throttle: short turns, no waking sleeping bots,
 fewer timer nudges) and **Also slow down at** a percent of the 5-hour window. Once set, the switch wins over `team.json`'s
 `throttle`. The phone changes them with the `usage.settings` action (`{"throttle": true}` or `{"limit": 80}` / `{"limit": null}`).
+
+## Team controls on the phone
+
+The phone's **New teammate** sheet (`bot.create`: name, role, color, what they do) adds a teammate the same way Squall's own
+New teammate window does, with the same name checks (letters and digits, not already on the team, at most 12). The phone gets
+the new teammate's id back and opens its chat. A teammate asleep in Squall shows as **napping** on the phone. **Wake Chief**
+(`chief.wake`) wakes Chief to look for something useful to do, and **Let Chief nap** (`chief.nap`) puts it back to sleep. A
+Chief running as a live session doesn't nap, so those two say so.

@@ -2035,6 +2035,9 @@
     sfx: name => sfx(name),
     usage: () => usageForPhone(),
     setUsage: r => setUsageSettings(r),
+    isSleeping: a => isSleeping(a),
+    addBot: b => phoneAddBot(b),
+    chief: { wake: () => phoneWakeChief(), nap: () => phoneNapChief() },
   });
 
   // "/demo farside": the team plays out a long simulated session on Farside in its own chat (Storm picked SIMULATED, 18 Oct 21:24; the
@@ -4371,6 +4374,43 @@
     if (S.agents.some(a => a.name.toLowerCase() === name.toLowerCase())) return name + ' is already on the team.';
     if (S.agents.length >= 12) return 'The team is full (12 teammates).';
     return '';
+  }
+  // a new teammate from the phone's New teammate sheet: the same checks and steps as the New teammate window here
+  async function phoneAddBot(b) {
+    const name = String(b.name || '').trim();
+    const bad = botNameProblem(name);
+    if (bad) throw new Error(bad);
+    const role = String(b.role || '').trim(), prompt = String(b.job || '').trim();
+    const color = /^#[0-9A-Fa-f]{6}$/.test(b.color || '') ? b.color : '#A78BFA';
+    await Bridge.call('teamAdd', { name, role, color, prompt });
+    noteTeamChange(name + ' joined the team (added by Storm on the phone).', true);
+    S.born = { name, until: Date.now() + 2600 }; sfx('born');
+    await saveNow();
+    await refreshTeamModel();
+    greetNewBot(name, role, 'Storm', prompt);
+    await saveNow();
+    renderAll();
+    // the window reloads for a team change (so every icon matches team.json); a moment later, so the phone hears back first
+    if (!S.selftest) setTimeout(needReload, 1500);
+  }
+  // Wake Chief and Let Chief nap, from the phone. Only a Chief that Squall runs itself sleeps; a live session wakes when you message it
+  function phoneChief() {
+    const a = S.lead || S.agents.find(x => x.lead);
+    if (!a) throw new Error('There’s no Chief on the team.');
+    if (S.mirror[a.name] || sessionRunning(a.name)) throw new Error(a.name + ' runs as a live session, so it doesn’t nap. Message it instead.');
+    return a;
+  }
+  function phoneWakeChief() {
+    const a = phoneChief(), chat = chatById('dm:' + a.name);
+    if (!chat) throw new Error('Chief’s chat isn’t open on the computer.');
+    if (agentBusy(a) || a.waking || S.flows[chat.id]) throw new Error(a.name + ' is already working.');
+    wakeBot(a);   // runs in the background: Chief looks for something useful, or goes back to sleep
+  }
+  function phoneNapChief() {
+    const a = phoneChief(), chat = chatById('dm:' + a.name);
+    if (agentBusy(a) || a.waking || (chat && S.flows[chat.id])) throw new Error(a.name + ' is working right now. It naps when it’s done.');
+    a.lastActive = Date.now() - SLEEP_AFTER_MS - 1;
+    renderTeamSoon(); saveSoon();
   }
   function openAddTeammate() {
     closeModal();
