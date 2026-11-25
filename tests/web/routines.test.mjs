@@ -36,8 +36,9 @@ test('Squall’s routines become the phone’s, and a routine whose bot left is 
   assert.equal(rs.length, 3);
   assert.deepEqual(rs[0], {
     id: 'rt1', botId: 'chief', task: 'Check the vault and sum it up.', repeat: 'daily', days: [true, true, true, true, true, true, true],
-    minutes: 9 * 60 + 5, isOn: true, pingWhenDone: true, askBeforePush: true, skipIfBusy: false,
+    minutes: 9 * 60 + 5, isOn: true, pingWhenDone: true, askBeforePush: true, skipIfBusy: false, lastRun: '2026-11-24',
   });
+  assert.equal('lastRun' in rs[1], false);
   assert.equal(rs[1].botId, 'quill');
   assert.equal(rs[1].repeat, 'weekdays');
   assert.deepEqual(rs[1].days, [true, true, true, true, true, false, false]);

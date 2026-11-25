@@ -219,11 +219,14 @@
       const m = /^(\d{1,2}):(\d{2})$/.exec(String(r.time || '').trim());
       const minutes = m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : 9 * 60;
       const days = DAY_SETS[r.days] ? r.days : 'daily';
-      return {
+      const out = {
         id: String(r.id), botId: idOf(r.bot), task: String(r.prompt || r.name || '').slice(0, 4000),
         repeat: days === 'weekends' ? 'custom' : days, days: DAY_SETS[days].map(Boolean), minutes,
         isOn: !r.off, pingWhenDone: true, askBeforePush: true, skipIfBusy: false,
       };
+      // the day it last ran (or was skipped), "YYYY-MM-DD" on the computer's clock: it doesn't run again that day
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(r.lastRun || ''))) out.lastRun = String(r.lastRun);
+      return out;
     });
   }
 
