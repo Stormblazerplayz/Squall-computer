@@ -20,6 +20,13 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 - `web/farside-demo.json`, the script behind the `/demo farside` command, because it holds private project notes. Without it that command answers that there is no demo.
 - One project name and a local folder path in `web/app.js` were replaced with neutral text. The `FARSIDE` constant in the idle-bot section is a placeholder: set it to your own folder.
 
+## Chief's error card on the phone
+
+When Chief's reply fails, the phone's **Try again** (`chief.retry`) sends Storm's last message to Chief again, like the
+↻ Try again button in Squall. It only works when Chief's newest reply really failed and Chief isn't busy; otherwise the phone
+says why. The phone's Settings > Computer also shows the **Claude Code version** (`state.claudeCode`), as reported by Squall's
+own runs, and offers an update when npm has a newer one. Squall's Settings > About shows the same, with the command to update.
+
 ## Phone pairing and updates
 
 **The iPhone and iPad app** pairs with a QR code: Settings, Squall app (iPhone and iPad), Pair a phone. The phone side is
