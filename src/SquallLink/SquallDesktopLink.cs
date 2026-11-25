@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Squall.Link.Pairing;
 using Squall.Link.Server;
+using Squall.Link.Uno;
 using Squall.Link.Updates;
 
 namespace Squall.Link
@@ -28,6 +29,8 @@ namespace Squall.Link
         public PageRelay Page { get; }
         public LinkServer Server { get; }
         public GitHubUpdater Updates { get; }
+        /// <summary>Squall Uno: the agents' own computers and live computer use (docs/squall-uno.md).</summary>
+        public UnoHub Uno { get; }
         public string ComputerId { get; }
 
         /// <summary>Closes Squall (on the UI thread). Called right after the updater has started.</summary>
@@ -38,14 +41,15 @@ namespace Squall.Link
         private string _announced = "";
         private bool _pageHello;
 
-        public SquallDesktopLink(LinkOptions? options = null, UpdaterOptions? updates = null)
+        public SquallDesktopLink(LinkOptions? options = null, UpdaterOptions? updates = null, UnoHubOptions? uno = null)
         {
             Options = options ?? new LinkOptions();
             ComputerId = ComputerIdentity.Id(Options.Folder);
             Pairing = new PairingWindow(Options.CodeLifetime, Options.MaxWrongTries);
             Phones = new PairedPhones(Options.Folder);
             Page = new PageRelay();
-            Server = new LinkServer(Options, Pairing, Phones, Page, ComputerId);
+            Uno = new UnoHub(System.IO.Path.Combine(Options.Folder, "uno"), uno);
+            Server = new LinkServer(Options, Pairing, Phones, Page, ComputerId, Uno);
             Updates = new GitHubUpdater(updates ?? new UpdaterOptions { Folder = System.IO.Path.Combine(Options.Folder, "updates") });
             Server.Paired += p =>
             {
@@ -54,6 +58,11 @@ namespace Squall.Link
             };
             Phones.Changed += () => Page.Tell("linkPhones", new JsonObject { ["phones"] = PhonesJson() });
             Updates.Changed += () => Page.Tell("linkUpdate", UpdateJson());
+            // Pushes arrive in the page as {"event": name, ...payload}, so no payload uses the key "event".
+            Uno.EventAdded += e => Page.Tell("uno", new JsonObject { ["ev"] = e.ToJson() });
+            Uno.Changed += () => Page.Tell("unoState", Uno.PushState());
+            Uno.WatchedFrame += (id, f) => Page.Tell("unoFrame", UnoHub.FrameJson(id, f));
+            Uno.ShotAdded += shot => Page.Tell("unoShot", new JsonObject { ["shot"] = shot.ToJson() });
         }
 
         /// <summary>Connects the Squall window. post must be safe to call from any thread (dispatch to the UI thread).</summary>
@@ -159,6 +168,13 @@ namespace Squall.Link
                     return Status();
                 case "updateInstall":
                     return new JsonObject { ["ok"] = InstallUpdateIfReady(), ["status"] = Updates.Status };
+                case "uno":
+                    {
+                        // The same ops as POST /api/v1/uno, plus "watch" (docs/squall-uno.md).
+                        var request = JsonNode.Parse(args.GetRawText()) as JsonObject ?? new JsonObject();
+                        request.Remove("do");
+                        return await Uno.HandleAsync(request, fromPage: true).ConfigureAwait(false);
+                    }
                 default:
                     throw new ArgumentException("Unknown link request: " + what);
             }
@@ -239,6 +255,7 @@ namespace Squall.Link
             _updateTimer = null;
             Page.Detach();
             await Server.DisposeAsync().ConfigureAwait(false);
+            await Uno.DisposeAsync().ConfigureAwait(false);
         }
     }
 

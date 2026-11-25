@@ -15,13 +15,15 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Squall.Link.Pairing;
+using Squall.Link.Uno;
 
 namespace Squall.Link.Server
 {
     /// <summary>
     /// The phone API from Squall-mobile docs/pairing.md, version 1:
     ///   POST /api/v1/pair, GET /api/v1/hello, DELETE /api/v1/pair,
-    ///   GET /api/v1/state, POST /api/v1/action, POST /api/v1/voice/turn, POST /api/v1/voice/end.
+    ///   GET /api/v1/state, POST /api/v1/action, POST /api/v1/voice/turn, POST /api/v1/voice/end,
+    ///   and Squall Uno (docs/squall-uno.md): POST /api/v1/uno, GET /api/v1/uno/frame, GET /api/v1/uno/shot.
     /// Plain HTTP on the home network only; every call but pairing needs the phone's token.
     /// State, actions and voice come from the Squall window through <see cref="PageRelay"/>; nothing is made up here.
     /// </summary>
@@ -32,6 +34,7 @@ namespace Squall.Link.Server
         private readonly PairedPhones _phones;
         private readonly PageRelay _page;
         private readonly string _computerId;
+        private readonly UnoHub? _uno;
         private readonly ConcurrentDictionary<string, (DateTimeOffset At, Lazy<Task<JsonObject>> Result)> _actions = new();
         private WebApplication? _app;
         private readonly SemaphoreSlim _gate = new(1, 1);
@@ -39,8 +42,9 @@ namespace Squall.Link.Server
         /// <summary>Raised (on a server thread) when a phone pairs.</summary>
         public event Action<PairedPhone>? Paired;
 
-        public LinkServer(LinkOptions options, PairingWindow window, PairedPhones phones, PageRelay page, string computerId)
+        public LinkServer(LinkOptions options, PairingWindow window, PairedPhones phones, PageRelay page, string computerId, UnoHub? uno = null)
         {
+            _uno = uno;
             _o = options;
             _window = window;
             _phones = phones;
@@ -162,6 +166,18 @@ namespace Squall.Link.Server
                     case "/api/v1/voice/end":
                         if (method != "POST") { await NotAllowed(ctx); return; }
                         await VoiceEnd(ctx);
+                        return;
+                    case "/api/v1/uno":
+                        if (method != "POST") { await NotAllowed(ctx); return; }
+                        await UnoOp(ctx);
+                        return;
+                    case "/api/v1/uno/frame":
+                        if (method != "GET") { await NotAllowed(ctx); return; }
+                        await UnoFrame(ctx);
+                        return;
+                    case "/api/v1/uno/shot":
+                        if (method != "GET") { await NotAllowed(ctx); return; }
+                        await UnoShot(ctx);
                         return;
                     default:
                         await Send(ctx, 404, new JsonObject { ["error"] = "not_found" });
@@ -316,6 +332,68 @@ namespace Squall.Link.Server
             body["phone"] = phone.Device.DeviceName;
             _page.Tell("linkAsk", new JsonObject { ["rid"] = "", ["kind"] = "voiceEnd", ["body"] = body });
             ctx.Response.StatusCode = 204;
+        }
+
+        // ===================================================================== Squall Uno
+
+        private async Task UnoOp(HttpContext ctx)
+        {
+            if (Phone(ctx) == null) { await Unknown(ctx); return; }
+            var body = await ReadJson(ctx);
+            if (body is not JsonObject o || o["op"] is not JsonValue opv || opv.GetValueKind() != JsonValueKind.String)
+            {
+                await Send(ctx, 400, new JsonObject { ["ok"] = false, ["error"] = "That request was broken." });
+                return;
+            }
+            if (_uno == null)
+            {
+                await Send(ctx, 501, new JsonObject { ["ok"] = false, ["error"] = "Squall on this computer can't do that yet. Update Squall on the computer." });
+                return;
+            }
+            var answer = await _uno.HandleAsync(o, fromPage: false, ctx.RequestAborted);
+            await Send(ctx, 200, answer);
+        }
+
+        private async Task UnoFrame(HttpContext ctx)
+        {
+            if (Phone(ctx) == null) { await Unknown(ctx); return; }
+            if (_uno == null) { await Send(ctx, 501, new JsonObject { ["error"] = "not_supported" }); return; }
+            string computer = ctx.Request.Query["computer"].ToString();
+            long after = long.TryParse(ctx.Request.Query["after"].ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var a) ? a : 0;
+            var (status, frame) = _uno.PhoneFrame(computer, after);
+            if (status == 404 || (status == 200 && frame == null)) { await Send(ctx, 404, new JsonObject { ["error"] = "no_computer" }); return; }
+            if (status == 204 || frame == null) { await Send(ctx, 204, null); return; }
+            var res = ctx.Response;
+            res.StatusCode = 200;
+            res.ContentType = "image/jpeg";
+            res.Headers.CacheControl = "no-store";
+            res.Headers["X-Uno-Frame"] = frame.Seq.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            res.Headers["X-Uno-Width"] = frame.Width.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            res.Headers["X-Uno-Height"] = frame.Height.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            res.Headers["X-Uno-Cursor"] = frame.CursorX.ToString(System.Globalization.CultureInfo.InvariantCulture) + "," + frame.CursorY.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            res.ContentLength = frame.Jpeg.Length;
+            await res.Body.WriteAsync(frame.Jpeg, ctx.RequestAborted);
+        }
+
+        private async Task UnoShot(HttpContext ctx)
+        {
+            if (Phone(ctx) == null) { await Unknown(ctx); return; }
+            if (_uno == null) { await Send(ctx, 501, new JsonObject { ["error"] = "not_supported" }); return; }
+            string session = ctx.Request.Query["session"].ToString();
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var shot = long.TryParse(ctx.Request.Query["id"].ToString(), System.Globalization.NumberStyles.Integer, inv, out var id) ? _uno.Shot(session, id) : null;
+            if (shot == null) { await Send(ctx, 404, new JsonObject { ["error"] = "no_shot" }); return; }
+            var res = ctx.Response;
+            res.StatusCode = 200;
+            res.ContentType = "image/jpeg";
+            // a kept picture never changes, so the phone may keep it
+            res.Headers.CacheControl = "private, max-age=86400";
+            res.Headers["X-Uno-Step"] = shot.Step.ToString(inv);
+            res.Headers["X-Uno-Width"] = shot.Width.ToString(inv);
+            res.Headers["X-Uno-Height"] = shot.Height.ToString(inv);
+            res.Headers["X-Uno-Cursor"] = shot.CursorX.ToString(inv) + "," + shot.CursorY.ToString(inv);
+            res.ContentLength = shot.Jpeg.Length;
+            await res.Body.WriteAsync(shot.Jpeg, ctx.RequestAborted);
         }
 
         // ===================================================================== Helpers

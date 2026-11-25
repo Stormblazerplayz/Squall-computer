@@ -48,7 +48,7 @@
     mirror: {},      // agent name -> { entries: [], session, status } : live view of that agent's real session
     typing: {},      // chat id -> { agent name: when it started } : who is working on a reply in that chat
     desk: [],        // every desktop session on this PC (title, transcript, modified), newest first (a list; sessions above is the map)
-    rightMode: 'board', // the right pane: 'board' (the team board), 'computer', 'live' (one agent's steps), 'sessions', 'vault' or 'todo'
+    rightMode: 'board', // the right pane: 'board' (the team board), 'computer', 'uno' (Squall Uno: every agent's own computer), 'live' (one agent's steps), 'sessions', 'vault' or 'todo'
     sessView: null,  // a session's transcript path while Storm reads it in the centre (read-only)
     sessMirror: {},  // transcript path -> { entries, status, title, loading } for the session being read
     usage: null,     // plan usage from the status line hook (null until it's connected)
@@ -181,7 +181,7 @@
     if (m.kind === 'agent' && m.text && chat.id === S.active) callReply(m.text);   // voice chat: the reply shows on the call screen
     chat.messages.push(m);
     if (m.kind === 'agent') { if (chat.id === S.active) sfx('reply'); const ba = S.byName[m.who]; if (typeof bgPulse === 'function') bgPulse(ba ? ba.color : null); }
-    else if (m.kind === 'error') sfx('error');
+    else if (m.kind === 'error') { sfx('error'); inboxProblem(chat, m); }
     if (m.kind === 'agent' && chat.id === S.active && /```squall-ask/.test(m.text || '')) setTimeout(() => sfx('question'), 160);   // a question card, just after the reply chime
     if (chat.id !== S.active && m.kind !== 'user') chat.unread++;
     if (m.kind === 'agent' && chat.id !== S.active) showPeek(chat, m);   // a reply elsewhere pops out of the bot's icon
@@ -369,6 +369,7 @@
     if (!run || !a) return;
     let o;
     try { o = JSON.parse(m.line); } catch (e) { run.out.push(m.line); return; }
+    if (o.type === 'system' && o.subtype === 'init' && o.claude_code_version) claudeCodeSeen(o.claude_code_version);   // (for the phone's Settings > Computer)
     if (o.type === 'system' && o.subtype === 'init') { if (o.session_id) run.sessionId = o.session_id; if (o.model) a.model = o.model; a.activity = 'Thinking…'; }
     else if (o.type === 'system' && o.subtype === 'compact_boundary') { a.compactedAt = Date.now(); S.compacts[a.name] = a.compactedAt; saveSoon(); }   // Claude Code really compacted
     else if (o.type === 'stream_event') onStream(a, o.event);
@@ -450,7 +451,7 @@
       let owner = null, tool = null;
       for (const t of a.turns) {
         const hit = t.tools.find(x => x.id === c.tool_use_id);
-        if (hit) { hit.status = c.is_error ? 'error' : 'ok'; owner = t; tool = hit; }
+        if (hit) { hit.status = c.is_error ? 'error' : 'ok'; owner = t; tool = hit; if (hit.name === 'Bash') hit.out = toolResultText(c.content).slice(-4000); }   // (for the phone's Live work terminal)
       }
       // a picture the bot read (image content in a tool result) is shown on the turn that ran the tool
       if (owner && Array.isArray(c.content)) for (const ib of c.content) if (ib && ib.type === 'image' && ib.source && ib.source.type === 'base64' && ib.source.data) addTurnImage(a, owner, tool, ib.source);
@@ -832,7 +833,7 @@
     settlePending(mi, fresh);
     noteCompactions(m.agent, fresh, !!m.reset);
     const a = S.byName[m.agent];
-    if (a) a.activity = mirrorActivity(mi);
+    if (a) { a.activity = mirrorActivity(mi); setLiveSteps(a, mi); }
     // a session just stopped to ask Storm something: flash the taskbar button and say so in the title
     // a real session that just finished its turn: the work timer may tell it to keep going
     const busyNow = mirrorBusy(mi, false);
@@ -1043,6 +1044,18 @@
     const last = (mi.entries || [])[(mi.entries || []).length - 1];
     if (last && last.role === 'thought') { const t = String(last.text || '').replace(/\s+/g, ' ').trim(); return 'Writing… ' + (t.length > 140 ? t.slice(0, 139) + '…' : t); }
     return 'Thinking…';
+  }
+  // The steps of the turn a live session is on now (its tool calls since Storm's or another Claude's last message), for the phone's
+  // Board and Mission control (link.js phoneBotLog). Kept off the saved team file: not enumerable, so JSON.stringify skips it
+  function setLiveSteps(a, mi) {
+    const es = mi.entries || [], out = [];
+    for (let i = es.length - 1; i >= 0 && out.length < 12; i--) {
+      const e = es[i];
+      if (e.role === 'user' || e.role === 'peer') break;
+      if (e.role === 'tool' && e.name) out.push({ name: String(e.name), detail: String(e.detail || '') });
+    }
+    out.reverse();
+    try { Object.defineProperty(a, 'liveSteps', { value: out, writable: true, configurable: true, enumerable: false }); } catch (e) { }
   }
   // the session is stopped on a question or a plan only Storm can answer
   const mirrorNeedsYou = mi => mirrorBusy(mi) && !!mi.status && (mi.status.tool === 'AskUserQuestion' || mi.status.tool === 'ExitPlanMode');
@@ -1686,6 +1699,7 @@
   function askAgent(chat, name, note, epoch) {
     return queueFor(name, async () => {
       if (epoch !== S.stopEpoch) return { name, isError: true, stopped: true, text: '', tasks: [], mentions: [] };
+      if (!jobStart(chat, name, note)) return { name, isError: true, stopped: true, text: '', tasks: [], mentions: [] };   // paused from the phone: no nudges until Resume
       let r;
       const peer = S.liveMode && S.link.status === 'on' ? peerFor(name) : null;
       const goLive = !!peer && peer.status !== 'offline';
@@ -1701,12 +1715,13 @@
           const real = NO_RELAY() && S.mirror[name] && S.mirror[name].session ? S.mirror[name].session.cwd || '' : '';   // direct: the bot's real session, from its folder
           r = await runAgent(name, built.prompt, sessionKey(chat, name), voiceOn && voiceMode === 'call' && chat.id === S.active ? CALL_WARM_S : warmFor(chat), real);
         }
-      } finally { delete typing[name]; const ag = S.byName[name]; if (ag) ag.lastActive = Date.now(); }
+      } finally { delete typing[name]; const ag = S.byName[name]; if (ag) { ag.lastActive = Date.now(); if (ag.job) ag.job.endedAt = Date.now(); } }
       const tasks = !r.isError && chat.kind !== 'dm' && name === chat.lead ? parseTasks(r.text, chat) : [];
       const actions = r.isError ? [] : parseActions(r.text);
       const shown = stripTasks(r.text) || (tasks.length ? 'Here’s the plan.' : actions.length ? 'On it.' : '(no reply)');
       const msg = addMessage(chat, { who: name, kind: r.isError ? 'error' : 'agent', text: shown, live: (goLive || (NO_RELAY() && !!S.mirror[name])) && !r.isError, standIn: S.liveMode && !goLive && !(NO_RELAY() && S.mirror[name]) && !!peerFor(name), standInFor: name, images: r.images || [] });
       markSeen(chat, name, [msg.id]);
+      if (!r.isError && !r.stopped) inboxDone(chat, name, shown);
       if (!r.isError) logTurnToVault(chat, name, shown);
       if (actions.length) await runActions(chat, name, actions);
       if (tasks.length) {
@@ -1803,6 +1818,12 @@
     let text = input.value.trim();
     if (/^\/demo\b/i.test(text)) { input.value = ''; autosize(); clearDraft(); startDemo(text); return; }
     if (/^\/anims?\b/i.test(text)) { input.value = ''; autosize(); clearDraft(); openAnimGallery(); return; }
+    if (/^\/(pause|resume)\s*$/i.test(text)) {
+      input.value = ''; autosize(); clearDraft();
+      const on = /^\/pause/i.test(text);
+      if (!setTeamPaused(on, 'the computer')) addMessage(chat, { who: APP, kind: 'event', text: on ? 'The team is already paused. Type /resume to start it again.' : 'The team isn’t paused.' });
+      return;
+    }
     const goal = goalOf(text);
     if (goal && goal.kind === 'help') { input.value = ''; autosize(); clearDraft(); addMessage(chat, { who: APP, kind: 'event', text: 'Goals: type /goal and what you want done, for example “/goal leaderboard script tested in Studio”. “/goal done” ends it.' }); return; }
     if (goal && goal.kind === 'done') { input.value = ''; autosize(); clearDraft(); stopTimer(chat.id); addMessage(chat, { who: APP, kind: 'event', text: 'Goal marked done. The work timer is off.' }); return; }
@@ -1880,6 +1901,33 @@
     Bridge.call('stopAll').catch(() => {});
   }
 
+  // ---------- Pause all (the phone's Mission control switch, and Siri's "Pause my team" / "Resume my team"; on the computer: the banner's
+  // Resume, or /pause and /resume). Pausing stops every bot's run, like Stop, and then nothing starts by itself until the team is resumed:
+  // no routines, wake-ups, idle work, To do drive, work timer nudges or away notes. Storm's own messages still go through. It lasts across restarts ----------
+  let teamPausedAt = 0;
+  try { teamPausedAt = Number(localStorage.getItem('squall.teamPaused')) || 0; } catch (e) { teamPausedAt = 0; }
+  function teamPaused() { return teamPausedAt > 0 && !S.selftest; }   // (the self-test runs its own routines and drive)
+  function setTeamPaused(on, from) {
+    on = !!on;
+    if (on === teamPaused()) return false;
+    teamPausedAt = on ? Date.now() : 0;
+    try { if (on) localStorage.setItem('squall.teamPaused', String(teamPausedAt)); else localStorage.removeItem('squall.teamPaused'); } catch (e) { }
+    if (on) stopAll();
+    const where = from ? ' from ' + from : '';
+    const lead = S.lead ? chatById('dm:' + S.lead.name) : null;
+    if (lead) addMessage(lead, { who: APP, kind: 'event', text: on ? '⏸ Team paused' + where + '. Nothing starts by itself until it’s resumed.' : '▶ Team resumed' + where + '. Routines, wake-ups and the To do drive are back on.' });
+    Bridge.call('log', { level: 'pause', msg: 'team ' + (on ? 'paused' : 'resumed') + where }).catch(() => {});
+    sfx(on ? 'okNo' : 'okYes');
+    renderBanner(); renderTeamSoon(); saveSoon();
+    return true;
+  }
+  function pausedFor() {
+    if (!teamPausedAt) return '';
+    const mins = Math.floor((Date.now() - teamPausedAt) / 60000);
+    return mins < 1 ? 'just now' : mins < 60 ? mins + ' min ago' : Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min ago';
+  }
+  setInterval(() => { if (teamPaused() && S.info.claudeFound) renderBanner(); }, 60000);   // keeps "paused 5 min ago" current
+
   // ---------- chats: open, create, edit ----------
   // groky r98: back/forward through the chats you opened in the left pane, like a browser. Alt+Left / Alt+Right or the mouse side buttons. No CSS, no motion.
   const CH = { back: [], fwd: [], nav: false };
@@ -1912,6 +1960,7 @@
   });
   function openChat(id) {
     const chFrom = S.active;   // groky r98
+    if (window.SquallUnoUI) window.SquallUnoUI.close();   // a chat replaces the Squall Uno view (web/uno.js)
     closeSessionView();
     S.noteView = null;
     if (id !== S.active) sfx('chat');
@@ -1987,6 +2036,70 @@
     catch (e) { return { on: false, error: e.message }; }
   }
 
+  // ---------- Problems and Done in the phone's Inbox (the phone's Inbox had only approvals from this PC): a bot's error, and a job a bot
+  // finished (a reply after a run that used tools), each kept 2 days, 40 at most, with whether Storm read or cleared it on the phone.
+  // Real runs only: nothing is kept in the self-test or the mock team. Functions and a var, because addMessage can run before this line ----------
+  var inboxLogCache;
+  function inboxLogLoad() {
+    if (Array.isArray(inboxLogCache)) return inboxLogCache;
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem('squall.inboxLog') || '[]'); } catch (e) { list = []; }
+    inboxLogCache = Array.isArray(list) ? list.filter(x => x && x.id && (x.kind === 'error' || x.kind === 'done')) : [];
+    return inboxLogCache;
+  }
+  function inboxLogSave() {
+    const list = inboxLogLoad(), cut = Date.now() - 2 * 24 * 3600 * 1000;
+    inboxLogCache = list.filter(x => Date.parse(x.at) >= cut).slice(-40);
+    try { localStorage.setItem('squall.inboxLog', JSON.stringify(inboxLogCache)); } catch (e) { }
+  }
+  function inboxOff() { return !!(S.selftest || S.mock); }
+  // the bot an error is about: the bot whose run failed ("Nova: …", "Couldn’t run Nova: …", "Couldn’t reach Nova: …"). Squall's own
+  // errors about the window (a file too big, a folder that won't open) aren't a bot's problem, so they stay off the phone
+  function inboxBotFor(m) {
+    if (!m || !S.byName) return null;
+    if (m.who && m.who !== APP && S.byName[m.who]) return m.who;
+    const t = String(m.text || '');
+    const named = /^([A-Za-z][\w-]*):\s/.exec(t) || /^Couldn[’']t (?:run|reach) ([A-Za-z][\w-]*)\b/.exec(t) || /^([A-Za-z][\w-]*) has no Claude session\b/.exec(t);
+    return named && S.byName[named[1]] ? named[1] : null;
+  }
+  function inboxFirstLine(text, max) {
+    const t = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim();
+    const end = t.search(/[.!?](\s|$)/);
+    const first = end > 0 && end < max ? t.slice(0, end + 1) : t;
+    return first.length > max ? first.slice(0, max - 1).trimEnd() + '…' : first;
+  }
+  function inboxAdd(item) {
+    const list = inboxLogLoad();
+    // the same error again within 10 minutes: one item, moved to now
+    const same = item.kind === 'error' ? list.find(x => x.kind === 'error' && !x.cleared && x.who === item.who && x.details === item.details && Date.now() - Date.parse(x.at) < 600000) : null;
+    if (same) { same.at = item.at; same.read = item.read; same.count = (same.count || 1) + 1; same.title = item.who + ' hit the same problem ' + same.count + ' times'; }
+    else list.push(item);
+    inboxLogSave();
+  }
+  function inboxProblem(chat, m) {
+    if (inboxOff() || !m) return;
+    const who = inboxBotFor(m);
+    if (!who) return;
+    const text = String(m.text || '').trim();
+    if (!text) return;
+    const said = text.startsWith(who + ': ') ? text.slice(who.length + 2) : text;
+    inboxAdd({ id: 'p' + uid(), kind: 'error', who, chatId: chat && chat.id, title: who + ' hit a problem', body: inboxFirstLine(said, 200), details: text.slice(0, 1500), at: new Date().toISOString(), read: !!(chat && onScreen(chat.id)) });
+  }
+  function inboxDone(chat, name, text) {
+    if (inboxOff()) return;
+    const ag = S.byName && S.byName[name];
+    const tools = ag && Array.isArray(ag.turns) ? ag.turns.reduce((n, t) => n + ((t && t.tools) || []).length, 0) : 0;
+    if (!tools) return;   // a plain answer isn't a finished job
+    inboxAdd({ id: 'd' + uid(), kind: 'done', who: name, chatId: chat && chat.id, title: name + ' finished a job', body: inboxFirstLine(text, 200) || (tools + (tools === 1 ? ' step' : ' steps') + ' done'), at: new Date().toISOString(), read: !!(chat && onScreen(chat.id)) });
+  }
+  function inboxLogList() { return inboxLogLoad().slice(); }
+  function inboxMark(id, what) {
+    let changed = false;
+    for (const x of inboxLogLoad()) if ((id == null ? !x.read : String(x.id) === String(id)) && !x[what]) { x[what] = true; if (what === 'cleared') x.read = true; changed = true; }
+    if (changed) inboxLogSave();
+    return changed;
+  }
+
   // ---------- the Squall app on iPhone and iPad (link.js; the host's SquallLink serves the phone): what it may read and do here ----------
   // Only Squall's real state goes to the phone. Each hook is called later, never while this file is still loading.
   function linkMessages(c) {
@@ -1994,18 +2107,34 @@
     if (mi) {
       const out = [];
       mi.entries.forEach((e, i) => {
-        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || '') });
+        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || ''), summary: e.role === 'assistant' ? (SUMS['e:' + e.k] || {}).text : undefined });
         else if (e.role === 'peer' && APP_NAME_RX.test(e.from || '') && !SQ_NOTE_RX.test(e.text || ''))
           out.push({ id: 'e' + i, who: 'Storm', kind: 'msg', text: stripBotOnly(String(e.text || '').replace(VIA_RX, '').replace(/\n\nHe[’']s watching this session live[\s\S]*$/, '')) });
       });
       return out;
     }
-    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time }));
+    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time, photos: (m.images || []).length || undefined, summary: m.kind === 'agent' ? (m.summary || (SUMS['m:' + m.id] || {}).text) : undefined }));
   }
   function linkTyping(c) {
     const mi = c.kind === 'dm' ? mirrorFor(c) : null;
     return [...new Set(Object.keys(S.typing[c.id] || {}).concat(mi && mirrorBusy(mi, false) ? [c.members[0]] : []))];
   }
+  // photos sent from the phone (link.js photoDo): the same as pasting them into chat c and sending, without moving the PC there
+  function linkSendPhotos(c, text, saved) {
+    const input = $('#input');
+    const keep = { active: S.active, split: S.split, right: S.focusRight, draft: input.value, attach: S.attach };
+    S.active = c.id; S.split = null; S.focusRight = false; S.attach = saved.slice();
+    input.value = text || '';
+    try { send(); } catch (e) { Bridge.call('log', { level: 'error', msg: 'phone photo: ' + (e && e.stack || e) }).catch(() => { }); }
+    const sent = S.attach.length === 0;   // send() empties the attachments when it takes the message
+    S.active = keep.active; S.split = keep.split; S.focusRight = keep.right; S.attach = keep.attach;
+    input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
+    return sent;
+  }
+  window.SquallPhotoOps = {
+    save: (data, type, name) => Bridge.call('saveImage', { data, type, name }),
+    send: (c, text, saved) => linkSendPhotos(c, text, saved),
+  };
   // sends text into chat c as Storm, the same as typing it there, without moving the PC to that chat; true when it went (or queued)
   function linkSend(c, text, call) {
     const input = $('#input');
@@ -2020,21 +2149,89 @@
     input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
     return sent;
   }
+  // Hand off from the phone (Team > a bot > Hand off): Storm asks the lead, in its chat, to take over, review or split up a bot's work,
+  // with what that bot is doing and its last message, and a note in both chats says so. Mission control then lists it (link.js,
+  // phoneHandoffs). The bot itself isn't stopped: the lead decides. Returns true, or the words for the phone when it can't
+  function phoneHandoff(from, to, job, note) {
+    const src = S.byName[from], lead = S.byName[to];
+    if (!src) return 'That teammate isn’t on the team any more.';
+    if (!lead) return 'There’s no Chief on the computer to hand it to.';
+    const dm = chatById('dm:' + to), srcDm = chatById('dm:' + from);
+    if (!dm) return 'Squall couldn’t find ' + to + '’s chat.';
+    const ask = job === 'review' ? 'Please review what ' + from + ' has done so far, and tell me what’s good and what needs fixing.'
+      : job === 'split' ? 'Please split ' + from + '’s current work up across the team, and hand out the pieces.'
+        : 'Please take over ' + from + '’s current work and finish it.';
+    const doing = src.status === 'working' && src.activity ? String(src.activity).slice(0, 200) : '';
+    let last = '';
+    if (srcDm) {
+      const said = linkMessages(srcDm).filter(m => m.who === from && m.kind === 'msg' && String(m.text || '').trim());
+      if (said.length) last = String(said[said.length - 1].text).replace(/\s+/g, ' ').trim();
+    }
+    if (last.length > 500) last = last.slice(0, 499).trimEnd() + '…';
+    const text = '(Hand off, from my phone) ' + ask
+      + (doing ? '\n\nWhat ' + from + ' is doing now: ' + doing : '')
+      + (last ? '\n\n' + from + '’s last message: “' + last + '”' : '')
+      + (note ? '\n\nMy note: ' + note : '');
+    if (!linkSend(dm, text, false)) return 'Squall couldn’t send it to ' + to + '. Is it signed in to Claude?';
+    const words = job === 'review' ? 'to review' : job === 'split' ? 'to split up' : 'to take over';
+    addMessage(dm, { who: APP, kind: 'event', text: '↪ Storm handed ' + from + '’s work to ' + to + ' ' + words + ', from the phone.', handoff: { from, to, what: (job === 'review' ? 'Review ' : job === 'split' ? 'Split up ' : 'Take over ') + from + '’s work' + (note ? ': ' + note : '') } });
+    if (srcDm) addMessage(srcDm, { who: APP, kind: 'event', text: '↪ Storm handed this work to ' + to + ' ' + words + ', from the phone.' });
+    return true;
+  }
   if (window.SquallLinkCore) window.SquallLinkCore.wire({
     S, Bridge, esc,
     phoneMessages: c => linkMessages(c),
     typingIn: c => linkTyping(c),
     send: (c, text, call) => linkSend(c, text, call),
     note: (c, text) => addMessage(c, { who: APP, kind: 'event', text }),
+    paused: () => teamPaused(),
+    setPaused: (on, from) => setTeamPaused(on, from),
     markRead: c => { if (c.unread) { c.unread = 0; saveSoon(); renderAll(); } },
+    retryChief: () => phoneRetryChief(),
+    claudeCode: () => claudeCodeForPhone(),
     clear: c => clearChat(c),
+    work: { list: () => workForPhone(), stop: name => phoneStopJob(name), pause: (name, on) => phonePauseJob(name, on) },
     answer: (rid, decision) => answerApproval(rid, decision),
     group: (name, members) => { const c = createGroup(name, members); if (c) renderAll(); return c; },
+    // the shared To do list (TODO, further down): the phone sees it and keeps it with the same functions as the right pane
+    todo: {
+      items: () => { try { return TODO.items; } catch (e) { return []; } },   // safe before the list is set up
+      add: (text, by) => todoAdd(text, by),
+      set: (id, status, who) => {
+        if (!todoSet(id, status)) return false;
+        const it = todoFind(id);
+        if (it && who) { it.who = who; todoSave(); }
+        return true;
+      },
+      del: id => { const had = TODO.items.some(x => x.id === id); if (had) todoDel(id); return had; },
+      clearDone: () => { const n = TODO.items.length; TODO.items = TODO.items.filter(x => x.status !== 'done'); if (TODO.items.length !== n) todoSave(); return n - TODO.items.length; },
+    },
     openSettings: () => openSettings(),
+    inbox: { list: () => inboxLogList(), read: id => inboxMark(id, 'read'), readAll: () => inboxMark(null, 'read'), clear: id => inboxMark(id, 'cleared') },
     closeModal: () => closeModal(),
+    handoff: (from, to, job, note) => phoneHandoff(from, to, job, note),
     sfx: name => sfx(name),
     usage: () => usageForPhone(),
     setUsage: r => setUsageSettings(r),
+    routines: {
+      list: () => ((S.team && S.team.routines) || []).map(r => Object.assign({}, r, { off: routineOff(r.id) })),
+      save: (r, oldId, on) => phoneSaveRoutine(r, oldId, on),
+      remove: id => removeRoutine(id),
+      setOn: (id, on) => { setRoutineOn(id, on); routinesChanged(); },
+      skipToday: id => skipRoutineToday(id),
+    },
+    isSleeping: a => isSleeping(a),
+    addBot: b => phoneAddBot(b),
+    chief: { wake: () => phoneWakeChief(), nap: () => phoneNapChief() },
+  });
+  // Squall Uno (web/uno.js): each agent's own computer, live, in the sidebar under the chats and in the middle
+  if (window.SquallUno) window.SquallUno.wire({
+    S, Bridge, esc,
+    renderTeamSoon: () => renderTeamSoon(),
+    renderPaneSoon: () => unoPaneSoon(),
+    sfx: name => sfx(name),
+    beforeOpen: () => { closeSessionView(); if (S.noteView) closeNote(); },
+    onClose: () => { renderAll(); $('#input').focus(); },
   });
 
   // "/demo farside": the team plays out a long simulated session on Farside in its own chat (Storm picked SIMULATED, 18 Oct 21:24; the
@@ -2424,7 +2621,7 @@
   }
   function wakeTick() {
     // Storm, 18 Oct: "Make the sessions not auto wake". Bots still fall asleep; Squall wakes one only when team.json has "autoWake": true
-    if (!(S.team && S.team.autoWake === true)) return;
+    if (!(S.team && S.team.autoWake === true) || teamPaused()) return;
     if (S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).length) return;   // one at a time, never while something is running or a call is on
     if (usageTight()) return;   // throttled: no waking bots while the plan is on track to run out
     const now = Date.now();
@@ -2478,7 +2675,7 @@
   }
   let idleChecking = false;
   async function idleWorkTick() {
-    if (S.idleWork === false || idleChecking || S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).some(id => { const b = S.byName[String(id).replace(/^dm:/, '')]; return !(b && b.idleJob); })) return;   // other bots' idle sessions don't block a free area
+    if (S.idleWork === false || teamPaused() || idleChecking || S.selftest || voiceOn || !S.agents.length || Object.keys(S.flows).some(id => { const b = S.byName[String(id).replace(/^dm:/, '')]; return !(b && b.idleJob); })) return;   // other bots' idle sessions don't block a free area
     if (Date.now() - Math.max(lastInput, lastTypedAt || 0) < IDLE_AWAY_MS || (S.bootAt && Date.now() - S.bootAt < IDLE_AWAY_MS)) return;   // Storm is active
     if ((TODO.items || []).some(i => i.status !== 'done')) return;   // the To do list comes first
     if (typeof usageTight === 'function' && usageTight()) return;
@@ -2499,7 +2696,7 @@
       const epoch = S.stopEpoch;
       let res = await askAgent(chat, a.name, idleNote(area[0], area[1]), epoch);
       while (Date.now() - start < IDLE_SESSION_MS - 60000) {
-        if (S.idleWork === false || stormSpoke() || S.stopEpoch !== epoch || !res) break;
+        if (S.idleWork === false || teamPaused() || stormSpoke() || S.stopEpoch !== epoch || !res) break;
         if (await Bridge.call('gameCheck').catch(() => false) === true) break;
         const left = Math.max(1, Math.round((IDLE_SESSION_MS - (Date.now() - start)) / 60000));
         const last = left <= 3;
@@ -2560,7 +2757,7 @@
       '<div class="member add" data-act="newgroup" title="Make a group chat"><div class="av-wrap"><div class="avatar gicon add">+</div></div><div class="mname">New group</div></div>' +
       '<div class="member add" data-act="newteammate" title="Add a teammate"><div class="av-wrap"><div class="avatar gicon add">+</div></div><div class="mname">Teammate</div></div>' +
       '<div class="member add" data-act="routines" title="Routines: jobs your bots do at set times, and the Claude app’s scheduled tasks"><div class="av-wrap"><div class="avatar gicon add rt-icon">' + ICON.clock + '</div></div><div class="mname">Routines</div></div>' +
-      '</div></div>');
+      '</div>' + (window.SquallUnoUI ? window.SquallUnoUI.sidebarHTML() : '') + '</div>');   // Squall Uno: each agent's computer, under the chats (web/uno.js)
     updateScrollFade();
   }
   // the team list fades out at the bottom while there's more to scroll to
@@ -2893,6 +3090,7 @@
     const a = S.rightMode === 'live' ? S.byName[S.live] : null;
     $('#live-tabs').innerHTML = '<button class="ltab board-tab' + (S.rightMode === 'board' ? ' on' : '') + '" data-boardtab="1" title="Every bot at a glance">Board</button>' +
       '<button class="ltab comp-tab' + (S.rightMode === 'computer' ? ' on' : '') + '" data-comptab="1" title="Squall’s own computer (Starx): watch it, click, type">Starx</button>' +
+      (window.SquallUnoUI ? '<button class="ltab uno-tab' + (S.rightMode === 'uno' ? ' on' : '') + '" data-unotab="1" title="Squall Uno: every agent’s own computer, live">Uno' + (window.SquallUnoUI.liveCount() ? '<span class="sess-count uno-live-count">' + window.SquallUnoUI.liveCount() + '</span>' : '') + '</button>' : '') +
       (a ? '<button class="ltab on' + (agentBusy(a) ? ' working' : '') + '" data-live="' + esc(a.name) + '" style="--c:' + esc(a.color) + '"><i></i>' + esc(a.name) + '</button>' : '');
   }
   // ---------- the team board: a card per bot with what it's doing, its task, its last result and the files it touched ----------
@@ -3074,11 +3272,22 @@
   // a page left on screen with nobody touching it: held redraws still land every 15 s, so it is never stale for long
   setInterval(() => { if (redrawHeld && !document.hidden && !flushing) { flushing = true; redrawHeld = false; try { renderAll(); } finally { flushing = false; } } }, 15000);
   idleCheck();
+  // ---------- the Uno tab: every agent's own Squall Uno computer at a glance (the cards open the live view in the centre) ----------
+  function renderUnoPane() {
+    patchHTML($('#live-body'), window.SquallUnoUI ? window.SquallUnoUI.paneHTML() : '<div class="live-empty" data-k="none">Squall Uno isn’t loaded</div>');
+    $('#live-foot').innerHTML = '<span>Start a task above, or click a computer to watch it live</span>';
+  }
+  let unoPaneTimer = 0;
+  function unoPaneSoon() {
+    if (unoPaneTimer) return;
+    unoPaneTimer = setTimeout(() => { unoPaneTimer = 0; if (S.rightMode === 'uno') renderLive(); else if (!S.winMin && !redrawHold()) renderLiveTabs(); }, 120);
+  }
   function renderLive() {
     if (redrawHold()) return;
     if (S.winMin) { S.renderPending = true; return; }
     if (S.rightMode === 'board') { renderLiveTabs(); renderBoardPane(); return; }
     if (S.rightMode === 'computer') { renderLiveTabs(); renderComputerPane(); return; }
+    if (S.rightMode === 'uno') { renderLiveTabs(); renderUnoPane(); return; }
     if (S.rightMode === 'sessions') { renderLiveTabs(); renderSessionsPane(); return; }
     if (S.rightMode === 'vault') { renderLiveTabs(); renderVaultPane(); return; }
     if (S.rightMode === 'todo') { renderLiveTabs(); renderTodoPane(); return; }
@@ -3154,6 +3363,100 @@
     renderLiveSoon();
   }
 
+  // ---------- live work on the phone (its Live work screens: what each bot is doing, step by step, with Stop, Pause and a note).
+  // Each bot's current job is a.job: what it's for (Storm's ask, a routine, idle work), who gave it and when it started. A nudge (work
+  // timer, To do drive, idle session) carries on the same job. The steps, terminal and files come from the run's real tool calls ----------
+  const WORK_SHOW_MS = 10 * 60000;   // a finished job stays on the phone this long
+  function toolResultText(content) {
+    if (typeof content === 'string') return content;
+    return Array.isArray(content) ? content.filter(x => x && x.type === 'text' && x.text).map(x => x.text).join('\n') : '';
+  }
+  function firstSentence(text) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    const m = /^(.{8,}?[.!?])(\s|$)/.exec(t);
+    const one = m ? m[1] : t;
+    return one.length > 100 ? one.slice(0, 99) + '…' : one;
+  }
+  // Starts or carries on the bot's job for this turn. False when the job is paused from the phone and this is a nudge, not Storm.
+  function jobStart(chat, name, note) {
+    const a = S.byName[name];
+    if (!a) return true;
+    const j = a.job;
+    if (note && j && j.paused) return false;
+    const routine = /^Routine "([^"]+)"/.exec(note || '');
+    if (note && !routine && j && j.chat === chat.id && !j.stopped) { j.endedAt = 0; return true; }   // a nudge: the same job goes on
+    let title, from;
+    if (routine) { title = 'Routine: ' + routine[1]; from = 'Routine'; }
+    else if (a.idleJob) { title = 'Farside ' + a.idleJob + ' (idle work)'; from = 'Idle work'; }
+    else {
+      const last = note ? null : (chat.messages || []).slice().reverse().find(m => m.kind === 'user' && String(m.text || '').trim());
+      title = last ? firstSentence(last.text) : note ? firstSentence(note) : 'Working';
+      from = last ? 'Storm' : APP;
+    }
+    a.job = { chat: chat.id, title, from, startedAt: Date.now(), endedAt: 0, paused: false, stopped: false };
+    return true;
+  }
+  function waitingAsk(name) {
+    for (const c of S.chats) for (const m of c.messages || []) if (m.who === name && m.kind === 'approve' && m.approve && m.approve.state === 'waiting') return m.approve.requestId;
+    return null;
+  }
+  function workForPhone() {
+    const now = Date.now(), out = [];
+    for (const a of S.agents) {
+      const j = a.job, mi = S.mirror[a.name];
+      const running = a.status === 'working' || !!(mi && mirrorBusy(mi, false)) || !!(j && !j.endedAt && !j.paused);
+      const paused = !!(j && j.paused);
+      if (!running && !paused && !(j && j.endedAt && now - j.endedAt < WORK_SHOW_MS)) continue;
+      const ask = waitingAsk(a.name);
+      const ended = !running && !paused;
+      const state = paused ? 'paused' : running ? (ask ? 'waiting' : 'working') : (j && j.stopped) || a.status === 'stopped' || a.status === 'error' ? 'stopped' : 'done';
+      const tools = [];
+      for (const t of a.turns || []) for (const x of t.tools || []) {
+        const i = x.input || {};
+        tools.push({ title: toolSummary(x), name: x.name, status: x.status, command: x.name === 'Bash' ? String(i.command || '') : '', out: x.out || '', file: i.file_path || i.notebook_path || '' });
+      }
+      out.push({
+        name: a.name, title: j ? j.title : (a.activity || 'Working'), from: j ? j.from : '', state, askId: ask,
+        startedAt: j ? j.startedAt : null,
+        now: paused ? 'Paused. Resume and ' + a.name + ' carries on.' : ended ? (a.activity || '') : (a.activity || 'Working…'),
+        tools,
+      });
+    }
+    return out;
+  }
+  function phoneStopJob(name) {
+    const a = S.byName[name];
+    if (!a) return 'That bot isn’t on the computer any more.';
+    const j = a.job;
+    const wasPaused = !!(j && j.paused);
+    if (j) { j.paused = false; j.stopped = true; if (!j.endedAt) j.endedAt = Date.now(); }
+    if (wasPaused) { const dm = chatById('dm:' + name); if (dm) addMessage(dm, { who: APP, kind: 'event', text: '⏹ Stopped ' + name + '’s paused job from the phone.' }); }
+    else stopAgentNow(name);
+    renderTeamSoon();
+    return true;
+  }
+  function phonePauseJob(name, on) {
+    const a = S.byName[name], dm = chatById('dm:' + name);
+    if (!a || !dm) return 'That bot isn’t on the computer any more.';
+    if (on) {
+      if (!a.job) a.job = { chat: dm.id, title: a.activity || 'Working', from: '', startedAt: Date.now(), endedAt: 0, paused: false, stopped: false };
+      a.job.paused = true;
+      stopAgentNow(name);
+      addMessage(dm, { who: APP, kind: 'event', text: '⏸ Paused ' + name + ' from the phone. Nothing nudges it until you resume it there or write to it here.' });
+    } else {
+      const j = a.job;
+      if (!j || !j.paused) return true;
+      if (!mirrorFor(dm) && S.flows[dm.id]) return 'It’s busy in that chat right now. Try again in a moment.';
+      j.paused = false; j.chat = dm.id; j.endedAt = Date.now();   // the resume note below carries the same job on, in the bot's own chat
+      driveOf(name).held = false;   // (Stop held the To do drive)
+      const note = 'Storm paused your job ("' + j.title + '") from his phone and has now resumed it. Carry on from where you stopped.';
+      if (mirrorFor(dm)) sendToMirror(dm, note, [], [], APP + ' (resume): ');
+      else continueLocal(dm, note);
+    }
+    renderTeamSoon();
+    return true;
+  }
+
   // ---------- resizable sidebars: drag the inner edge of the team column or the right pane; double-click puts it back ----------
   // rail: the strip's team rail (Storm, 19 Oct: "the sidebar can't resize"); wide enough, the bots' names show beside their avatars
   const SIDE = { left: { min: 160, max: 420, def: 220 }, right: { min: 280, max: 760, def: 400 }, rail: { min: 50, max: 220, def: 50 } };
@@ -3208,6 +3511,12 @@
       b.className = 'banner' + (nudge ? ' warn' : '');
       b.innerHTML = '<span class="grow"><b>One-time sign-in.</b> ' + APP + ' runs Claude Code with your own Claude account. Click Sign in, finish it in the browser, then come back.</span>' +
         '<button class="primary" data-act="signin">Sign in</button><button data-act="recheck">I’ve signed in</button>';
+      return;
+    }
+    if (teamPaused()) {
+      b.className = 'banner paused';
+      b.innerHTML = '<span class="grow"><b>⏸ Team paused</b> ' + esc(pausedFor()) + '. Nothing starts by itself: no routines, wake-ups, idle work or To do drive. Your own messages still go through.</span>' +
+        '<button class="primary" data-act="resumeteam">Resume</button>';
       return;
     }
     if (S.liveMode && S.link.status === 'error') {
@@ -3297,6 +3606,7 @@
     // the Vault button opens Coreshell (Storm, 19 Oct: "Put coreshell into the vault button")
     if (t.closest('[data-coreshell]')) { Bridge.call('openCoreshell').catch(err => addMessage(activeChat(), { who: APP, kind: 'error', text: 'Couldn’t open Coreshell: ' + err.message })); return; }
     if (t.closest('[data-comptab]')) { S.rightMode = 'computer'; renderLive(); return; }
+    if (t.closest('[data-unotab]')) { S.rightMode = 'uno'; renderLive(); if (window.SquallUnoUI) window.SquallUnoUI.refresh(); return; }
     const ttb = t.closest('[data-todotab]');
     if (ttb) { S.rightMode = 'todo'; renderLive(); todoLoad(); return; }
     const tdo = t.closest('[data-todo]');
@@ -3349,6 +3659,7 @@
       else if (what === 'togglelive') { S.liveMode = !S.liveMode; if (S.liveMode) { startLink(); startMirrors(); } else { stopLink(); stopMirrors(); } saveSoon(); renderAll(); renderBanner(); }
       else if (what === 'relink') { S.link.status = 'off'; startLink(); }
       else if (what === 'hidelivenote') { S.liveNoteHidden = true; saveSoon(); renderBanner(); }
+      else if (what === 'resumeteam') setTeamPaused(false, 'the computer');
       else if (what === 'timer') { if (document.querySelector('.td-pop')) closeTimerDial(); else openTimerDial(); }
       else if (what === 'settings') openSettings();
       else if (what === 'updates') openUpdateLog();
@@ -3623,6 +3934,57 @@
 
   // error bubbles: shown for a few minutes in a live chat, and dismissed with ×
   const ERROR_SHOW_MS = 3 * 60000;
+  // The phone's Try again on Chief's error card (chief.retry): like the ↻ Try again button here, Storm's last message to Chief goes again.
+  // Only when Chief's newest reply really failed, and not while Chief is busy
+  function phoneRetryChief() {
+    const lead = S.lead, c = lead && chatById('dm:' + lead.name);
+    if (!c) return 'Chief isn’t on the computer.';
+    if (S.flows[c.id]) return lead.name + ' is already working on it.';
+    let i = c.messages.length - 1;
+    while (i >= 0 && c.messages[i].kind === 'event') i--;
+    const err = i >= 0 ? c.messages[i] : null;
+    if (!err || err.kind !== 'error' || err.who !== lead.name) return 'There’s nothing to try again: ' + lead.name + '’s last reply didn’t fail.';
+    const mine = c.messages.slice(0, i).reverse().find(x => x.who === 'Storm' && x.kind === 'user' && x.text);
+    if (!mine) return 'There’s no message of yours to send again.';
+    if (!linkSend(c, mine.text, false)) return 'Squall couldn’t send it again. Is it signed in to Claude?';
+    dismissMessage(err.id);
+    return true;
+  }
+
+  // ---------- the Claude Code version, for the phone's Settings > Computer and Chief's error card: the version each run reports when it
+  // starts, and the newest one on npm, checked every 6 hours. Nothing is guessed: no version until a run has reported one ----------
+  const CLAUDE_LATEST_MS = 6 * 3600000;
+  const claudeCodeInfo = { version: '', latest: '', checkedAt: 0 };
+  try { Object.assign(claudeCodeInfo, JSON.parse(localStorage.getItem('squall.claudeCode') || '{}') || {}); } catch (e) { }
+  function claudeCodeSave() { try { localStorage.setItem('squall.claudeCode', JSON.stringify(claudeCodeInfo)); } catch (e) { } }
+  function claudeCodeSeen(v) {
+    v = String(v || '').trim().slice(0, 40);
+    if (!/^\d+\.\d+\.\d+/.test(v)) return;
+    if (v !== claudeCodeInfo.version) { claudeCodeInfo.version = v; claudeCodeSave(); }
+    claudeLatestCheck();   // (at most every 6 hours)
+  }
+  let claudeLatestBusy = false;
+  async function claudeLatestCheck(force) {
+    if (claudeLatestBusy || S.selftest || S.mock || !claudeCodeInfo.version) return;
+    if (!force && Date.now() - claudeCodeInfo.checkedAt < CLAUDE_LATEST_MS) return;
+    claudeLatestBusy = true;
+    try {
+      const r = await fetch('https://registry.npmjs.org/@anthropic-ai/claude-code/latest', { cache: 'no-store' });
+      const j = r.ok ? await r.json() : null;
+      if (j && /^\d+\.\d+\.\d+/.test(String(j.version || ''))) { claudeCodeInfo.latest = String(j.version).slice(0, 40); claudeCodeInfo.checkedAt = Date.now(); claudeCodeSave(); }
+    } catch (e) { /* offline: try again on the next check */ }
+    finally { claudeLatestBusy = false; }
+  }
+  setInterval(() => claudeLatestCheck(), 30 * 60000);
+  function claudeCodeAboutHTML() {
+    const v = claudeCodeInfo.version;
+    if (!v) return '';
+    const n = x => (/^(\d+)\.(\d+)\.(\d+)/.exec(x || '') || []).slice(1).map(Number);
+    const l = claudeCodeInfo.latest, a = n(l), b = n(v);
+    const newer = a.length === 3 && b.length === 3 && (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
+    return '<div class="set-note">Claude Code ' + esc(v) + (newer ? ' · ' + esc(l) + ' is out: run <code>claude update</code> in a terminal' : '') + '</div>';
+  }
+  function claudeCodeForPhone() { return claudeCodeInfo.version ? { version: claudeCodeInfo.version, latest: claudeCodeInfo.latest || '' } : null; }
   // "Try again" on a teammate's failed reply: Storm's last message in this chat goes again, to the same teammate. Whatever he has
   // typed in the box meanwhile (and any attachments) stays there
   function retryFrom(id) {
@@ -3700,6 +4062,7 @@
   function openSession(path) {
     const s = (S.desk || []).find(x => x.transcript === path);
     if (!s) return;
+    if (window.SquallUnoUI) window.SquallUnoUI.close();
     if (S.sessView && S.sessView !== path) stopSessionMirror(S.sessView);
     S.sessView = path;
     S.sessMirror[path] = S.sessMirror[path] || { entries: [], status: null, loading: true, title: '' };
@@ -4372,6 +4735,43 @@
     if (S.agents.length >= 12) return 'The team is full (12 teammates).';
     return '';
   }
+  // a new teammate from the phone's New teammate sheet: the same checks and steps as the New teammate window here
+  async function phoneAddBot(b) {
+    const name = String(b.name || '').trim();
+    const bad = botNameProblem(name);
+    if (bad) throw new Error(bad);
+    const role = String(b.role || '').trim(), prompt = String(b.job || '').trim();
+    const color = /^#[0-9A-Fa-f]{6}$/.test(b.color || '') ? b.color : '#A78BFA';
+    await Bridge.call('teamAdd', { name, role, color, prompt });
+    noteTeamChange(name + ' joined the team (added by Storm on the phone).', true);
+    S.born = { name, until: Date.now() + 2600 }; sfx('born');
+    await saveNow();
+    await refreshTeamModel();
+    greetNewBot(name, role, 'Storm', prompt);
+    await saveNow();
+    renderAll();
+    // the window reloads for a team change (so every icon matches team.json); a moment later, so the phone hears back first
+    if (!S.selftest) setTimeout(needReload, 1500);
+  }
+  // Wake Chief and Let Chief nap, from the phone. Only a Chief that Squall runs itself sleeps; a live session wakes when you message it
+  function phoneChief() {
+    const a = S.lead || S.agents.find(x => x.lead);
+    if (!a) throw new Error('There’s no Chief on the team.');
+    if (S.mirror[a.name] || sessionRunning(a.name)) throw new Error(a.name + ' runs as a live session, so it doesn’t nap. Message it instead.');
+    return a;
+  }
+  function phoneWakeChief() {
+    const a = phoneChief(), chat = chatById('dm:' + a.name);
+    if (!chat) throw new Error('Chief’s chat isn’t open on the computer.');
+    if (agentBusy(a) || a.waking || S.flows[chat.id]) throw new Error(a.name + ' is already working.');
+    wakeBot(a);   // runs in the background: Chief looks for something useful, or goes back to sleep
+  }
+  function phoneNapChief() {
+    const a = phoneChief(), chat = chatById('dm:' + a.name);
+    if (agentBusy(a) || a.waking || (chat && S.flows[chat.id])) throw new Error(a.name + ' is working right now. It naps when it’s done.');
+    a.lastActive = Date.now() - SLEEP_AFTER_MS - 1;
+    renderTeamSoon(); saveSoon();
+  }
   function openAddTeammate() {
     closeModal();
     const colors = ['#4FE3C1', '#3D9BE9', '#A78BFA', '#F59E4B', '#F6D860', '#F87171', '#F472B6', '#86EFAC'];
@@ -4665,6 +5065,102 @@
     noteTeamChange(r.name + ' was removed from the team.');
     teamChanged();
   }
+  // Manage teammate on the phone (squall-computer docs/phone-teammates.md): rename, chief on or off and remove, with the same checks as
+  // the right-click menu here. A rename or a remove reloads the window like New teammate from the phone does: a moment later, so the
+  // phone hears back first. link.js reads these through window.SquallTeamOps
+  function phoneTeamBot(name) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const chat = chatById('dm:' + a.name);
+    if (agentBusy(a) || a.waking || (chat && S.flows[chat.id])) throw new Error(a.name + ' is working right now. Try again when it’s done.');
+    return a;
+  }
+  async function phoneRenameBot(from, to) {
+    const a = phoneTeamBot(from);
+    to = String(to || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9]{1,19}$/.test(to)) throw new Error('Use a short name: letters and digits, starting with a letter (2 to 20 characters).');
+    if (to === a.name) return a.name;
+    if (S.agents.some(x => x !== a && x.name.toLowerCase() === to.toLowerCase())) throw new Error(to + ' is already on the team.');
+    const r = await Bridge.call('teamRename', { from: a.name, to, byBot: false });
+    migrateRename(a.name, r.name);
+    if (S.teamNews && S.teamNews[a.name]) { S.teamNews[r.name] = S.teamNews[a.name]; delete S.teamNews[a.name]; }
+    noteTeamChange(a.name + ' was renamed to ' + r.name + ' (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneRemoveBot(name) {
+    const a = phoneTeamBot(name);
+    if (a.lead && S.agents.filter(x => x.lead).length <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamRemove', { name: a.name });
+    migrateRemove(r.name);
+    if (S.teamNews) delete S.teamNews[r.name];
+    noteTeamChange(r.name + ' was removed from the team (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneSetChief(name, on) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    if (!!a.lead === !!on) return !!a.lead;
+    const chiefs = S.agents.filter(x => x.lead).length;
+    if (on && chiefs >= 4) throw new Error('The team already has 4 chiefs. Take one off first.');
+    if (!on && chiefs <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamChief', { name: a.name, chief: !!on });
+    a.lead = !!r.lead;
+    S.chiefs = S.agents.filter(x => x.lead);
+    S.lead = S.chiefs[0] || S.lead;
+    for (const c of S.chats) if (c.kind === 'group') { const ch = S.chiefs.find(x => c.members.includes(x.name)); c.lead = ch ? ch.name : c.members[0]; }
+    renderTeam(); renderChatHead();
+    teamNote(chatById('team'), a.name + (a.lead ? ' is now a chief (from the phone).' : ' is no longer a chief (from the phone).'));
+    noteTeamChange(a.name + (a.lead ? ' was promoted to chief.' : ' is no longer a chief.'));
+    saveSoon();
+    return a.lead;
+  }
+  // the project a teammate works in (the right-click Project picker): the folders under Documents\Projects, and the pick saved to team.json
+  async function phoneProjects() {
+    const r = await Bridge.call('projectList', {});
+    return ((r && r.projects) || []).filter(p => p && p.name && p.path).map(p => ({ name: String(p.name), path: String(p.path) }));
+  }
+  async function phoneSetFolder(name, path) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const res = await Bridge.call('teamSetFlag', { name: a.name, key: 'folder', value: path || null });
+    a.folder = (res && res.value) || '';
+    renderTeamSoon();
+    const where = a.folder ? String(a.folder).split(/[\\/]/).filter(Boolean).pop() : '';
+    teamNote(chatById('team'), a.name + (where ? ' now works in ' + where : ' works across all of Projects again') + ' from its next run (set on the phone).');
+    saveSoon();
+    return a.folder;
+  }
+  window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief, projects: phoneProjects, setFolder: phoneSetFolder };
+  // Add teammate from the phone (squall-computer docs/phone-add-teammate.md): the same as Bring to life in Add teammate here
+  async function phoneAddBot(name, role, color, prompt) {
+    name = String(name || '').trim();
+    const bad = botNameProblem(name);
+    if (bad) throw new Error(bad);
+    await Bridge.call('teamAdd', { name, role: String(role || ''), color, prompt: String(prompt || '') });
+    noteTeamChange(name + ' joined the team (added on the phone).', true);
+    S.born = { name, until: Date.now() + 2600 }; sfx('born');
+    await saveNow();
+    await refreshTeamModel();
+    greetNewBot(name, String(role || ''), 'Storm', String(prompt || '')).catch(() => { });
+    await saveNow();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return name;
+  }
+  window.SquallAddOps = { add: phoneAddBot, presets: () => BOT_PRESETS.map(p => ({ id: p.id, label: p.label, role: p.role, brief: p.brief, color: p.color })) };
+  // the Obsidian vault on the phone (squall-computer docs/phone-notes.md): the same search, read and add-a-line as the vault window here.
+  // Nothing is removed or overwritten
+  window.SquallNotesOps = {
+    search: q => Bridge.call('vaultSearch', { query: q }),
+    read: path => Bridge.call('vaultRead', { path }),
+    append: (path, text) => Bridge.call('vaultAppend', { path, text }),
+    list: async () => { const d = await Bridge.call('vaultGraph'); return (d && d.nodes) || []; },
+  };
   // keep the chats, sessions and timers that belong to a renamed or deleted bot in step with team.json
   function migrateRename(from, to) {
     for (const c of S.chats) {
@@ -4988,15 +5484,78 @@
           '<span class="rt-pill' + (x.enabled ? '' : ' off') + '">' + (x.enabled ? 'On' : 'Off') + '</span></div>';
       }).join('') + '</div>' : '<div class="runs-none">The Claude app has no scheduled tasks.</div>');
   }
+  // Routines turned off (in the Routines list or from the phone) stay, but don't run. Which ones is kept on this computer.
+  var routinesOffMap = null;
+  function routinesOff() {
+    if (!routinesOffMap) { try { routinesOffMap = JSON.parse(localStorage.getItem('squall.routinesOff') || '{}') || {}; } catch (e) { routinesOffMap = {}; } }
+    return routinesOffMap;
+  }
+  function routineOff(id) { return !!routinesOff()[id]; }
+  function setRoutineOn(id, on) {
+    const m = routinesOff();
+    if (on) delete m[id]; else m[id] = true;
+    try { localStorage.setItem('squall.routinesOff', JSON.stringify(m)); } catch (e) { }
+  }
+  function routineDay(d) { const p = n => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
+  var routinesRerender = null;   // redraws the open Routines list (keeping a half-typed new routine) after a change from the phone
+  function routinesChanged() { if (routinesRerender) routinesRerender(); }
+  async function removeRoutine(id) {
+    const r = await Bridge.call('routineRemove', { id });
+    if (!S.team) S.team = {};
+    S.team.routines = r.routines;
+    setRoutineOn(id, true);
+    routinesChanged();
+  }
+  function skipRoutineToday(id) {
+    const r = ((S.team && S.team.routines) || []).find(x => x.id === id);
+    if (!r) return;
+    const today = routineDay(new Date());
+    r.lastRun = today;
+    Bridge.call('routineRan', { id, date: today }).catch(() => { });
+    routinesChanged();
+  }
+  // a routine saved on the phone: a new one is added; an edited one is added again with its changes and the old one removed
+  // (the host has no edit), keeping its on/off and, when the time didn't change, that it already ran today
+  async function phoneSaveRoutine(r, oldId, on) {
+    if (!S.team) S.team = {};
+    const old = oldId ? (S.team.routines || []).find(x => x.id === oldId) : null;
+    if (oldId && !old) throw new Error('That routine isn’t on the computer any more.');
+    const before = new Set((S.team.routines || []).map(x => x.id));
+    const added = await Bridge.call('routineAdd', Object.assign({}, r, { by: old ? (old.by || 'Storm') : 'Storm' }));
+    S.team.routines = added.routines;
+    const fresh = (S.team.routines || []).find(x => !before.has(x.id));
+    if (old) {
+      try {
+        const res = await Bridge.call('routineRemove', { id: old.id });
+        S.team.routines = res.routines;
+      } catch (e) {
+        // the old one is still there, so take the new copy away again: never two of the same routine
+        if (fresh) { try { const back = await Bridge.call('routineRemove', { id: fresh.id }); S.team.routines = back.routines; } catch (e2) { } }
+        routinesChanged();
+        throw e;
+      }
+      setRoutineOn(old.id, true);
+    }
+    if (fresh) {
+      setRoutineOn(fresh.id, on !== false);
+      const now = (S.team.routines || []).find(x => x.id === fresh.id);
+      if (old && old.lastRun && old.time === r.time && now) {
+        now.lastRun = old.lastRun;
+        Bridge.call('routineRan', { id: now.id, date: old.lastRun }).catch(() => { });
+      }
+    }
+    routinesChanged();
+  }
   function openRoutines() {
     closeModal();
     const box = document.createElement('div');
     box.className = 'modal-back';
+    routinesRerender = () => { if (!box.isConnected) { routinesRerender = null; return; } const keep = keepRoutineForm(box); render(); keep(); };
     const render = () => {
       const rs = (S.team && S.team.routines) || [];
       box.innerHTML = '<div class="modal add-modal routines-modal"><div class="set-head"><h3>Routines</h3><button class="set-x" data-t="close" title="Close">×</button></div>' +
-        '<div class="add-hint">A routine gives a bot a job at a set time: every day, on weekdays or at weekends. Squall runs it while it’s open. Bots can add routines too when you ask them.</div>' +
-        (rs.length ? '<div class="rt-list">' + rs.map(r => '<div class="rt-row"><div class="rt-main"><b>' + esc(r.name) + '</b><span>' + esc(r.bot) + ' · ' + esc(r.days) + ' at ' + esc(r.time) + (r.by && r.by !== 'Storm' ? ' · made by ' + esc(r.by) : '') + (r.lastRun ? ' · last ran ' + esc(r.lastRun) : '') + '</span><i>' + esc(String(r.prompt || '').slice(0, 160)) + '</i></div><button class="set-btn" data-rmrt="' + esc(r.id) + '">Remove</button></div>').join('') + '</div>'
+        '<div class="add-hint">A routine gives a bot a job at a set time: every day, on weekdays or at weekends. Squall runs it while it’s open. Turn one off to pause it, here or on your phone. Bots can add routines too when you ask them.</div>' +
+        (rs.length ? '<div class="rt-list">' + rs.map(r => { const off = routineOff(r.id); return '<div class="rt-row' + (off ? ' off' : '') + '"><div class="rt-main"><b>' + esc(r.name) + '</b><span>' + esc(r.bot) + ' · ' + esc(r.days) + ' at ' + esc(r.time) + (r.by && r.by !== 'Storm' ? ' · made by ' + esc(r.by) : '') + (r.lastRun ? ' · last ran ' + esc(r.lastRun) : '') + '</span><i>' + esc(String(r.prompt || '').slice(0, 160)) + '</i></div><button class="rt-pill rt-toggle' + (off ? ' off' : '') + '" data-rton="' + esc(r.id) + '" title="' + (off ? 'Off: it won’t run. Click to turn it on' : 'On: click to turn it off without removing it') + '">' + (off ? 'Off' : 'On') + '</button><button class="set-btn" data-rmrt="' + esc(r.id) + '">Remove</button></div>'; }).join('') + '</div>'
           : '<div class="runs-none">No routines yet.</div>') +
         appTasksHTML() +
         '<div class="rt-new"><div class="rt-new-h">New routine</div>' +
@@ -5012,10 +5571,12 @@
     Bridge.call('appTasks').then(ts => { S.appTasks = ts || []; if (box.isConnected) { const keep = keepRoutineForm(box); render(); keep(); } }).catch(() => { S.appTasks = []; });
     box.addEventListener('click', e => {
       if (e.target === box) { closeModal(); return; }
+      const tg = e.target.closest('[data-rton]');
+      if (tg) { const id = tg.dataset.rton; setRoutineOn(id, routineOff(id)); routinesChanged(); return; }
       const rm = e.target.closest('[data-rmrt]');
       if (rm) {
         if (!confirm('Remove this routine?')) return;
-        Bridge.call('routineRemove', { id: rm.dataset.rmrt }).then(r => { S.team.routines = r.routines; render(); }).catch(err => { box.querySelector('#rt-status').textContent = err.message; });
+        removeRoutine(rm.dataset.rmrt).catch(err => { box.querySelector('#rt-status').textContent = err.message; });
         return;
       }
       const t = e.target.closest('[data-t]');
@@ -5035,10 +5596,11 @@
   // A busy bot gets it on a later tick, up to 5 minutes late.
   function routineTick(at) {
     const rs = (S.team && S.team.routines) || [];
-    if (!rs.length) return;
+    if (!rs.length || teamPaused()) return;   // paused: a routine that comes due waits (up to 5 minutes, as for a busy bot)
     const d = at instanceof Date ? at : new Date(), pad = n => String(n).padStart(2, '0');
     const nowMin = d.getHours() * 60 + d.getMinutes(), today = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()), dow = d.getDay();
     for (const r of rs) {
+      if (routineOff(r.id)) continue;
       const hm = String(r.time || '').split(':').map(Number), rMin = hm[0] * 60 + hm[1];
       if (!(nowMin >= rMin && nowMin - rMin <= 5) || r.lastRun === today) continue;
       if (r.days === 'weekdays' && (dow === 0 || dow === 6)) continue;
@@ -5352,6 +5914,7 @@
     return VG.byKey[k] !== undefined ? VG.byKey[k] : VG.byKey[k.split('/').pop()];
   }
   async function openNote(path) {
+    if (window.SquallUnoUI) window.SquallUnoUI.close();
     closeSessionView(); closeQuick();
     S.noteView = { path, name: String(path).split('/').pop().replace(/\.md$/i, ''), text: '', loading: true };
     renderChatHead(); renderChat(); renderComposer(); vgKick();
@@ -5481,7 +6044,7 @@
       '<div class="set-sec"><div class="set-title">Workspace and sign-in</div>' +
         '<div class="set-row"><span>Where the agents keep their files</span><button class="set-btn" data-s="folder">' + ICON.folder + 'Open folder</button></div>' +
         '<div class="set-row"><span>' + (S.signedIn === false ? 'Not signed in to Claude yet' : S.signedIn ? 'Signed in to Claude' : 'Sign-in not checked yet') + '</span><span class="set-btns"><button class="set-btn" data-s="signin">Sign in</button><button class="set-btn" data-s="recheck">Check again</button></span></div></div>' +
-      '<div class="set-sec set-about"><div class="set-title">About</div><div>' + esc(APP) + ' ' + esc((S.info && S.info.version) || '') + '</div>' + recentUpdatesHTML() + '<div class="set-note">' + esc((S.info && S.info.workDir) || '') + '</div></div>' +
+      '<div class="set-sec set-about"><div class="set-title">About</div><div>' + esc(APP) + ' ' + esc((S.info && S.info.version) || '') + '</div>' + claudeCodeAboutHTML() + recentUpdatesHTML() + '<div class="set-note">' + esc((S.info && S.info.workDir) || '') + '</div></div>' +
       '</div>';
     document.body.append(box);
     Bridge.call('voiceStatus').then(t => { const el = box.querySelector('#set-vstatus'); if (el) el.textContent = String(t || ''); }).catch(() => { });
@@ -5585,6 +6148,57 @@
     S.model = id; S.modelPicked = true; saveSoon(); renderModelChip(); closeModelMenu();
     Bridge.call('setModel', { model: id }).catch(() => {});
   }
+  // the phone's model picker (link.js withModels / modelDo)
+  window.SquallModelOps = {
+    list: () => MODELS.map(m => ({ id: m.id, name: m.name, note: m.note })),
+    current: () => S.model,
+    set: id => setModel(id),
+  };
+  // the phone's work timers (link.js withTimers / timerDo): the same as the timer dial's Done, in any chat
+  window.SquallTimerOps = {
+    list: () => Object.keys(S.timers).filter(id => S.timers[id]).map(id => {
+      const t = S.timers[id];
+      return { chatId: id, until: t.until === Infinity ? null : t.until, mins: t.mins, startedAt: t.startedAt, paused: !!t.paused };
+    }),
+    workFor: () => S.workFor,
+    start: (c, v) => {
+      startTimer(c, v);
+      const t = S.timers[c.id];
+      if (!t) return false;
+      const mi = mirrorFor(c);
+      const busy = mi ? mirrorBusy(mi) : !!S.flows[c.id];
+      const pendingNow = !!mi && (mi.pending || []).some(p => Date.now() - p.at < 60000);
+      addMessage(c, { who: APP, kind: 'event', text: '⏱ Work timer started from the phone: ' + (v === 'inf' ? 'Continuous' : v >= 60 && v % 60 === 0 ? v / 60 + ' h' : v + ' min') + '.' });
+      if (!busy && !pendingNow) timerTick(c.id);   // idle now: the first nudge goes out right away
+      else t.busySeen = true;                       // busy now: the watch nudges when it finishes
+      return true;
+    },
+    stop: c => { if (!S.timers[c.id]) return false; stopTimer(c.id); return true; },
+  };
+  // Summaries and Catch up from the phone (docs/phone-summaries.md): the same Haiku summary as the Summary button under a message.
+  // A message's summary the phone asked for shows under it on the computer too.
+  window.SquallSummaryOps = {
+    summarize: text => Bridge.call('summarize', { text }),
+    save: (c, id, s) => {
+      if (!c || !s) return;
+      const m = (c.messages || []).find(x => x.id === id);
+      if (m) {
+        if (m.kind !== 'agent' || m.summary) return;
+        m.summary = s; msgCache.delete(m); saveSoon();
+      } else {
+        const mi = c.kind === 'dm' ? mirrorFor(c) : null, e = mi && /^e\d+$/.test(String(id)) ? mi.entries[+String(id).slice(1)] : null;
+        if (!e || e.role !== 'assistant') return;
+        SUMS['e:' + e.k] = { text: s }; entryHTML.delete(e);
+      }
+      if (activeChat() === c) renderChat();
+    },
+  };
+
+  // Shared clipboard from the phone (docs/phone-clipboard.md): text only, and only when the phone asks.
+  window.SquallClipOps = {
+    read: () => Bridge.call('clipboardRead', {}),
+    write: text => Bridge.call('clipboardWrite', { text: String(text || '') }).then(() => true),
+  };
 
   function startTimer(chat, forced) {
     const v = forced || S.workFor;
@@ -5660,6 +6274,7 @@
   function timerWatchTick() {
     const ids = Object.keys(S.timers);
     if (!ids.length) { clearInterval(timerWatch); timerWatch = null; return; }
+    if (teamPaused()) return;   // Pause all: a timer Storm starts while paused waits for Resume before it nudges
     for (const id of ids) {
       const t = S.timers[id], chat = chatById(id);
       if (!t || !chat || t.paused) continue;   // paused by its bot until Storm's next message
@@ -5777,6 +6392,7 @@
   }
   function driveTick() {
     if (S.selftest) return;   // the self-test drives its own chats
+    if (teamPaused()) return;   // Pause all: no To do nudges
     for (const a of (S.chiefs && S.chiefs.length ? S.chiefs : (S.lead ? [S.lead] : []))) {
       const chat = chatById('dm:' + a.name), d = driveOf(a.name);
       if (!chat || d.held || drivePaused[a.name] || S.timers[chat.id]) { d.busySeen = false; d.idleSince = 0; continue; }
@@ -5822,7 +6438,7 @@
   }
   function stormLeft() {
     if (document.hasFocus()) return;
-    if (usageTight()) return;   // throttled: the bots keep going on their own without being told
+    if (usageTight() || teamPaused()) return;   // throttled or paused: no "keep working on your own" note
     const chats = workingChats().filter(c => !S.timers[c.id] && Date.now() - (awaySaidAt[c.id] || 0) >= AWAY_GAP_MS);
     if (!chats.length) return;
     for (const c of chats) awaySaidAt[c.id] = Date.now();

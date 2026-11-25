@@ -20,6 +20,15 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <!-- QR codes (MIT licence). -->
     <PackageReference Include="QRCoder" Version="1.6.0" />
+    <!-- Squall Uno: the official Anthropic C# SDK (Messages API with the computer-use toolset). -->
+    <PackageReference Include="Anthropic" Version="13.14.0" />
+    <!-- Squall Uno: the saved API key is encrypted with Windows DPAPI for the current user. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Squall Uno's desktop image (Dockerfile, start script, Firefox policies), extracted before `docker build`. -->
+    <EmbeddedResource Include="Uno\Desktop\*" LogicalName="Squall.Link.Uno.Desktop.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

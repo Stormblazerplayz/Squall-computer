@@ -268,6 +268,10 @@ body.strip .anim-orbit::before { background: radial-gradient(circle at 50% 12%, 
 #center { position: relative; }
 .banner { margin: 12px 12px 0; padding: 12px 14px; border-radius: 12px; display: flex; align-items: center; gap: 12px; font-size: 13px; background: rgba(167, 139, 250, 0.1); border: 1px solid rgba(167, 139, 250, 0.32); color: #e2dbff; }
 .banner.warn { background: rgba(245, 177, 74, 0.1); border-color: rgba(245, 177, 74, 0.35); color: #ffe2b0; }
+.banner.paused { background: linear-gradient(90deg, rgba(232, 207, 74, 0.16), rgba(232, 207, 74, 0.06)); border-color: rgba(232, 207, 74, 0.45); color: #fff3bf; animation: bannerPauseIn .35s ease-out; }
+.banner.paused b { color: #ffe98a; }
+@keyframes bannerPauseIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .banner.paused { animation: none; } }
 .banner .grow { flex: 1; }
 .banner button { height: 30px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--panel-2); }
 .banner button.primary { background: var(--grad); border-color: transparent; color: #fff; font-weight: 600; }
@@ -786,6 +790,10 @@ body.strip #agents .moon { display: none; }
 .rt-app-h span { font-weight: 400; font-size: 11.5px; color: var(--muted); }
 .rt-pill { flex: none; align-self: center; padding: 3px 10px; border-radius: 999px; font: 600 11px/1.4 var(--font); background: rgba(74, 222, 128, 0.14); color: #86efac; }
 .rt-pill.off { background: rgba(148, 163, 184, 0.14); color: #94a3b8; }
+.rt-toggle { cursor: pointer; margin-right: 8px; border: 0; }
+.rt-toggle:hover { filter: brightness(1.2); }
+.rt-toggle:focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }
+.rt-row.off .rt-main { opacity: 0.55; }
 /* napping: a sleeping teammate's chat header */
 .st-pill.nap { color: #c7d2fe; background: rgba(129, 140, 248, 0.12); border-color: rgba(129, 140, 248, 0.35); }
 .st-pill.nap i { background: #fde68a; box-shadow: 0 0 6px rgba(253, 230, 138, 0.8); animation: moonGlow 4.8s ease-in-out infinite; }

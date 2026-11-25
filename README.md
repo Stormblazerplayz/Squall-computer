@@ -10,8 +10,17 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 | `web/mobile.html` | The page the host serves to a phone on the home Wi-Fi: pair, then see and send chats. |
 | `src/SquallLink/` | The phone link (pairing, the phone API, voice) and the GitHub auto-updater, in C#. `src/SquallSwap/` is the small program that swaps in an update. |
 | `web/link.js` | The window's half of the phone link, and the Pair a phone screen. |
+| `web/uno.js` | The window's half of Squall Uno (each agent's own computer, live): the sidebar section, the Uno tab in the right pane (every computer at a glance) and the live view. See [`docs/squall-uno.md`](docs/squall-uno.md). |
+| `web/gif.js` | A small animated GIF encoder (no dependencies) that Squall Uno's **Save replay** uses to save a task's step pictures as a GIF, made in the window. |
 | `tests/` | Tests: `dotnet test SquallLink.sln` and `node --test tests/web/*.test.mjs`. |
 | `team.json` | The team: each agent's role, prompt, allowed tools and memory, who leads, and the team rules. |
+
+## Chief's error card on the phone
+
+When Chief's reply fails, the phone's **Try again** (`chief.retry`) sends Storm's last message to Chief again, like the
+↻ Try again button in Squall. It only works when Chief's newest reply really failed and Chief isn't busy; otherwise the phone
+says why. The phone's Settings > Computer also shows the **Claude Code version** (`state.claudeCode`), as reported by Squall's
+own runs, and offers an update when npm has a newer one. Squall's Settings > About shows the same, with the command to update.
 
 ## What is not in this repo yet
 
@@ -19,6 +28,17 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 - Binaries (`Squall.exe`, the WebView2 DLLs), the bots' `workspace/` folders, and Squall's runtime state and logs.
 - `web/farside-demo.json`, the script behind the `/demo farside` command, because it holds private project notes. Without it that command answers that there is no demo.
 - One project name and a local folder path in `web/app.js` were replaced with neutral text. The `FARSIDE` constant in the idle-bot section is a placeholder: set it to your own folder.
+
+## Live work on the phone
+
+Each bot's job goes to the phone in `state.work`, for its **Live work** screens: what the job is (Storm's ask, a routine or idle
+work), who gave it, when it started, what the bot is doing now, its steps (the tools it really used), its terminal (its shell
+commands and their output) and the files it wrote or edited. A job Squall only sees from outside (a live session) has no steps.
+A finished job stays for 10 minutes.
+
+**Stop** (`work.stop`) stops the bot like Squall's own Stop. **Pause** (`work.pause`) stops it too and holds it: no work timer,
+To do drive or idle nudges reach it until **Resume**, which tells it to carry on, or until you write to it. **Send a note**
+(`work.note`) goes to the bot's own chat.
 
 ## Phone pairing and updates
 
@@ -30,6 +50,16 @@ How to wire both into `Squall.exe`, and how to make a release, is in [`docs/desk
 **The older phone web page** (Settings, Phone, Turn on) still works the same way: the PC's address and a 6-digit code
 for `web/mobile.html`.
 
+## Pause all
+
+The phone's **Pause all** switch (Mission control) and Siri's **Pause my team** / **Resume my team** send the `team.pause`
+action (`{"paused": true}` or `{"paused": false}`). On the computer, type `/pause` or `/resume` in any chat, or press
+**Resume** on the yellow banner.
+
+Pausing stops every bot's run, like Stop, and then nothing starts by itself until the team is resumed: no routines,
+wake-ups, idle work, To do drive, work timer nudges or away notes. Your own messages still go through. The pause lasts
+across restarts. The phone gets `state.paused: true`, and every bot that isn't working or waiting on you shows as paused.
+
 ## Plan usage on the phone
 
 The usage chip under the send bar (your plan's 5-hour and weekly windows, read from Claude) also goes to the phone, in
@@ -39,3 +69,20 @@ the pace lands, and the jobs each bot did today (Squall times its own runs, from
 Both the phone and the usage menu have **Slow the team down to save usage** (the throttle: short turns, no waking sleeping bots,
 fewer timer nudges) and **Also slow down at** a percent of the 5-hour window. Once set, the switch wins over `team.json`'s
 `throttle`. The phone changes them with the `usage.settings` action (`{"throttle": true}` or `{"limit": 80}` / `{"limit": null}`).
+
+## Routines on the phone
+
+Squall's routines (Routines tile: a bot gets a job at a set time, every day, on weekdays or at weekends) go to the phone in
+`state.routines` (see `web/link.js`, `phoneRoutines`), so the phone's **Routines** tab shows the real ones. From the phone you
+can add one, edit it, turn it on or off, skip today, or delete it (`routine.save`, `routine.toggle`, `routine.skip`,
+`routine.delete`). Each one carries `lastRun` (the day it last ran or was skipped), so the phone knows today's run is done. Squall runs routines on every day, weekdays or weekends, so a phone routine on other days is refused with a
+reason. Editing adds the changed routine and removes the old one (the host has no edit). **On / Off** also shows in the
+Routines list on the computer: an off routine stays but doesn't run (kept in `localStorage`, `squall.routinesOff`).
+
+## Team controls on the phone
+
+The phone's **New teammate** sheet (`bot.create`: name, role, color, what they do) adds a teammate the same way Squall's own
+New teammate window does, with the same name checks (letters and digits, not already on the team, at most 12). The phone gets
+the new teammate's id back and opens its chat. A teammate asleep in Squall shows as **napping** on the phone. **Wake Chief**
+(`chief.wake`) wakes Chief to look for something useful to do, and **Let Chief nap** (`chief.nap`) puts it back to sleep. A
+Chief running as a live session doesn't nap, so those two say so.
