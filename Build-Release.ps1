@@ -60,7 +60,7 @@ Get-ChildItem (Join-Path $root 'web') -File | Where-Object {
     $_.Name -notmatch '\.(bak|log)' -and $_.Name -notmatch '\.(broken|pre)-' -and $_.Name -ne 'farside-demo.json'
 } | Copy-Item -Destination $web -Force
 
-foreach ($must in @('Squall.exe', 'SquallSwap.exe', 'web/index.html', 'web/app.js', 'web/link.js')) {
+foreach ($must in @('Squall.exe', 'SquallSwap.exe', 'web/index.html', 'web/app.js', 'web/link.js', 'web/uno.js')) {
     if (-not (Test-Path (Join-Path $app $must))) { throw "The release is missing $must." }
 }
 foreach ($never in @('team.json', 'state.json', 'window.json', 'workspace')) {

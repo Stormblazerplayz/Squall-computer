@@ -1907,6 +1907,7 @@
   });
   function openChat(id) {
     const chFrom = S.active;   // groky r98
+    if (window.SquallUnoUI) window.SquallUnoUI.close();   // a chat replaces the Squall Uno view (web/uno.js)
     closeSessionView();
     S.noteView = null;
     if (id !== S.active) sfx('chat');
@@ -2028,6 +2029,14 @@
     openSettings: () => openSettings(),
     closeModal: () => closeModal(),
     sfx: name => sfx(name),
+  });
+  // Squall Uno (web/uno.js): each agent's own computer, live, in the sidebar under the chats and in the middle
+  if (window.SquallUno) window.SquallUno.wire({
+    S, Bridge, esc,
+    renderTeamSoon: () => renderTeamSoon(),
+    sfx: name => sfx(name),
+    beforeOpen: () => { closeSessionView(); if (S.noteView) closeNote(); },
+    onClose: () => { renderAll(); $('#input').focus(); },
   });
 
   // "/demo farside": the team plays out a long simulated session on Farside in its own chat (Storm picked SIMULATED, 18 Oct 21:24; the
@@ -2553,7 +2562,7 @@
       '<div class="member add" data-act="newgroup" title="Make a group chat"><div class="av-wrap"><div class="avatar gicon add">+</div></div><div class="mname">New group</div></div>' +
       '<div class="member add" data-act="newteammate" title="Add a teammate"><div class="av-wrap"><div class="avatar gicon add">+</div></div><div class="mname">Teammate</div></div>' +
       '<div class="member add" data-act="routines" title="Routines: jobs your bots do at set times, and the Claude app’s scheduled tasks"><div class="av-wrap"><div class="avatar gicon add rt-icon">' + ICON.clock + '</div></div><div class="mname">Routines</div></div>' +
-      '</div></div>');
+      '</div>' + (window.SquallUnoUI ? window.SquallUnoUI.sidebarHTML() : '') + '</div>');   // Squall Uno: each agent's computer, under the chats (web/uno.js)
     updateScrollFade();
   }
   // the team list fades out at the bottom while there's more to scroll to
@@ -3693,6 +3702,7 @@
   function openSession(path) {
     const s = (S.desk || []).find(x => x.transcript === path);
     if (!s) return;
+    if (window.SquallUnoUI) window.SquallUnoUI.close();
     if (S.sessView && S.sessView !== path) stopSessionMirror(S.sessView);
     S.sessView = path;
     S.sessMirror[path] = S.sessMirror[path] || { entries: [], status: null, loading: true, title: '' };
@@ -5276,6 +5286,7 @@
     return VG.byKey[k] !== undefined ? VG.byKey[k] : VG.byKey[k.split('/').pop()];
   }
   async function openNote(path) {
+    if (window.SquallUnoUI) window.SquallUnoUI.close();
     closeSessionView(); closeQuick();
     S.noteView = { path, name: String(path).split('/').pop().replace(/\.md$/i, ''), text: '', loading: true };
     renderChatHead(); renderChat(); renderComposer(); vgKick();

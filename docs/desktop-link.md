@@ -8,6 +8,10 @@
 2. **Updating itself from GitHub Releases.** Squall checks this repo's newest release, downloads
    `Squall-win-x64.zip`, checks its SHA-256, and when Storm presses **Update** (or Squall is idle), `SquallSwap.exe`
    swaps the files, starts the new Squall and rolls back if it doesn't start.
+3. **Squall Uno (live computer use).** `src/SquallLink/Uno` runs Squall's agents on their own Linux computers in
+   Docker, with the Claude computer-use tool, a live screen and a "WHAT IT DID" feed for the window and the phone.
+   `SquallDesktopLink` creates it (`Uno`, folder `uno` in the link folder) and serves it to the phone; the contract
+   for the window, the phone and the API lives in [docs/squall-uno.md](squall-uno.md).
 
 The window half is `web/link.js`, which `web/app.js` wires up. Nothing is made up: the phone only ever sees Squall's real
 bots, chats and approvals, and anything Squall can't do yet answers "Squall on the computer can't do that yet."

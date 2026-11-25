@@ -1,4 +1,4 @@
-# Checks every push and pull request: the phone link and updater (C#) on Windows and Linux, and web/link.js with Node.
+# Checks every push and pull request: the phone link and updater (C#) on Windows and Linux, and web/link.js and web/uno.js with Node.
 name: CI
 
 on:
@@ -51,6 +51,7 @@ jobs:
           node --check web/app.js
           node --check web/link.js
           node --check web/markdown.js
+          node --check web/uno.js
 
-      - name: Test web/link.js
+      - name: Test web/link.js and web/uno.js
         run: node --test tests/web/*.test.mjs

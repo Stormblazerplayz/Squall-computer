@@ -1,0 +1,137 @@
+# Squall Uno: live computer use
+
+Squall Uno is Squall's own computer-using agent. Every Squall agent (Chief and each bot) gets **its own computer
+inside Squall**: a small Linux desktop (Firefox, a taskbar, a terminal) running in a Docker container on the PC.
+A Squall Uno session drives that computer with Claude's computer-use toolset, and you can watch it click and type
+live, from the Squall window or from the phone. Nothing here touches the PC's own screen.
+
+Everything below is real: frames come from the container's screen, events come from the actions Squall Uno really
+ran. Nothing is made up when Docker or the API key is missing; the app says what is missing instead.
+
+## What the PC needs
+
+- **Docker Desktop**, installed and running. Squall builds the desktop image (`squall-uno-desktop:1`) from the
+  `Uno/Desktop/` files shipped inside SquallLink the first time a computer starts (a few minutes, once).
+- **An Anthropic API key**, either the user environment variable `SQUALL_UNO_KEY` (it wins when both are set), or
+  saved from Squall's Uno settings (`uno/key.dat` in the Squall link folder, encrypted with Windows DPAPI for the
+  current user). No answer ever contains the key; `settings.keyHint` shows its first 7 and last 4 characters.
+
+## Ids and names
+
+- `agentId`: the Squall agent the computer belongs to (`"chief"` for Chief, otherwise the bot id the app already
+  uses). `agentName`: its display name ("Chief", "Scout").
+- One computer per agent: `computerId` = `"pc-" + agentId` lower-cased with anything outside `[a-z0-9-]` turned
+  into `-` (max 40 chars). Container name: `squall-uno-<computerId>`.
+- Sessions: `sessionId` = `"uno-" + 12 hex chars`. One running session per computer at a time.
+
+## Objects (JSON, camelCase; times are Unix milliseconds)
+
+```jsonc
+// Computer
+{ "id": "pc-chief", "agentId": "chief", "agentName": "Chief", "name": "Chief's computer",
+  "state": "off" | "starting" | "on" | "error",
+  "stateText": "Setting up the computer. The first time takes a few minutes.",   // plain sentence, may be ""
+  "width": 1280, "height": 800,
+  "sessionId": "uno-…" | null,         // the session running on it right now
+  "frameSeq": 42 }                     // newest frame number (0 = none yet)
+
+// Session
+{ "id": "uno-3f2a9c1b7d4e", "computerId": "pc-chief", "agentId": "chief", "agentName": "Chief",
+  "task": "Find the weather in Paris",
+  "state": "starting" | "running" | "you" | "done" | "stopped" | "error",   // "you" = the user has the wheel
+  "startedAt": 1764000000000, "endedAt": null,
+  "steps": 7,                          // tool calls run so far
+  "now": "Clicking Search at (640, 120)",   // what it is doing right now (or last did)
+  "lastText": "…",                     // newest thing Squall Uno said
+  "error": null,
+  "inputTokens": 12345, "outputTokens": 678 }
+
+// Event (the "WHAT IT DID" feed). seq numbers are big and only go up (they start from the clock when Squall
+// starts, so they keep growing across restarts): just pass the newest one back as `since`.
+{ "seq": 101, "at": 1764000000000, "sessionId": "uno-…", "computerId": "pc-chief",
+  "who": "uno" | "you" | "system",
+  "kind": "start" | "screenshot" | "zoom" | "click" | "double_click" | "triple_click" | "right_click" |
+          "middle_click" | "move" | "drag" | "mouse_down" | "mouse_up" | "type" | "key" | "hold_key" |
+          "scroll" | "wait" | "cursor" | "say" | "message" | "takeover" | "handback" | "done" |
+          "stopped" | "error",
+  "text": "Clicked at (412, 230)",      // short plain sentence for the feed
+  "x": 412, "y": 230,                  // optional, screen pixels (computer's width × height space)
+  "x2": 600, "y2": 300,                // optional, end point of a drag
+  "step": 3 }                          // optional
+
+// Settings
+{ "hasKey": true, "keySource": "env" | "saved" | "none", "keyHint": "sk-ant-…a1b2",
+  "dockerReady": true, "dockerText": "Docker is running.",   // or what to do
+  "imageReady": true,
+  "model": "claude-opus-5-5", "maxSteps": 80,
+  "tokensToday": { "input": 120000, "output": 4000 } }
+```
+
+## One request format, two ways in
+
+The Squall window and the phone send the same **ops**. Each op is a JSON object with `op` plus its fields; the
+answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain sentence>" }`.
+
+- Window: `Bridge.call('link', { do: 'uno', op: '…', … })` → `SquallDesktopLink.HandlePageCommandAsync`.
+- Phone: `POST /api/v1/uno` with the bearer token and body `{ "op": "…", … }`. Unknown token → 401 as usual. Every op
+  answers HTTP 200 with the op's JSON (including `{ok:false, error}`); a body that isn't JSON with an `op` → 400
+  `{ok:false, error}`.
+
+| op | fields | answer |
+|---|---|---|
+| `state` | `since` (int, optional, default 0), `sessionId` (optional) | `{ ok, settings, computers[], sessions[] (newest first, max 30), events[] (seq > since, oldest first, max 300, only that session's if sessionId), lastSeq }` — pass `lastSeq` as the next `since` (when more than 300 are waiting it is the last one returned, so the next call gets the rest; a `since` bigger than anything Squall has, e.g. from before a restart, starts from the oldest kept event) |
+| `start` | `agentId`, `agentName`, `task` | `{ ok, sessionId, computerId }` — starts the computer if needed, then the session |
+| `message` | `sessionId`, `text` | `{ ok }` — follow-up; if the session ended it continues the same conversation, if it is running the text is given to Squall Uno before its next step |
+| `stop` | `sessionId` | `{ ok }` |
+| `stopAll` | – | `{ ok, stopped }` — stops every running session (computers stay on) |
+| `takeover` | `sessionId` | `{ ok }` — session state becomes `"you"`; Squall Uno pauses after the action it is on |
+| `input` | `computerId`, `action` (`left_click`, `double_click`, `right_click`, `type`, `key`, `scroll`), `x`, `y` (clicks, scroll), `text` (type, key), `direction` (`up`/`down`, scroll), `amount` (scroll, optional, default 3) | `{ ok }` — only while that computer's session is `"you"` or no session is running; logged with `who: "you"`. `x`/`y` are in the computer's 1280×800 space; key names like `Return`, `ctrl+l` |
+| `handback` | `sessionId`, `note` (optional) | `{ ok }` — Squall Uno gets a list of what you did plus the note, then carries on |
+| `computerOff` | `computerId` | `{ ok }` — stops its session and removes the container |
+| `saveKey` | `key` | `{ ok, settings }` |
+| `removeKey` | – | `{ ok, settings }` |
+| `check` | – | `{ ok, text, settings }` — asks Anthropic for the model's details (free) and checks Docker; `text` is plain sentences saying what works and what to fix |
+| `setMaxSteps` | `value` (10–300) | `{ ok, settings }` |
+| `watch` | `computerId` or null (window only) | `{ ok }` — the window gets live frames for that computer |
+
+### Live frames
+
+- Phone: `GET /api/v1/uno/frame?computer=<id>&after=<seq>` (bearer token). Answers `200 image/jpeg` with headers
+  `X-Uno-Frame: <seq>`, `X-Uno-Width`, `X-Uno-Height`, `X-Uno-Cursor: <x>,<y>`; `204` when there is no newer frame
+  than `after` (wait ~250 ms and ask again); `404 {error:"no_computer"}` when the computer is off. Polling this
+  keeps the computer's screen streaming (about 4 frames a second) for 15 seconds after the last request.
+  Frame numbers are shared by all computers and only go up, so pass back the `X-Uno-Frame` you got; an `after`
+  from another computer just gets that computer's newest frame. Screens are only captured while someone needs them
+  (a running session, the window watching, or a phone that asked in the last 15 seconds).
+- Window: after `watch`, the page gets pushes `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}`
+  (see Pushes below), starting with the newest frame right away if there is one. `watch` with `computerId: null` stops.
+
+### Pushes to the window
+
+These use the existing `Page.Tell(name, payload)`, which posts `{"event": name, ...payload}` to the page (the same
+shape as `linkPhones` and `linkUpdate`; web/app.js hands it to `Bridge.on(name, m => …)`). Because the key `event`
+carries the name, no payload has a key called `event`:
+
+- `{"event":"uno","ev":{…Event}}` for every event (the Event object is under `ev`).
+- `{"event":"unoState","computers":[…],"sessions":[…],"settings":{…}}` whenever a computer, session or setting
+  changes (sessions newest first, max 30).
+- `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}` for each new
+  frame of the computer the window watches (see `watch`).
+
+## How a session runs
+
+1. The computer starts (`docker run`) if it is off, and the image is built first if needed.
+2. Squall Uno calls the Messages API (`claude-opus-5-5`, adaptive thinking, the `computer_toolset_20260801`
+   toolset) with a system prompt that says it is **Squall Uno**, working for the agent on its own computer.
+3. Each `tool_use` (member names like `left_click`, `type`, `screenshot`, …) runs inside the container with
+   `xdotool` / ImageMagick, gets logged as an Event, and answers with a `tool_result` that echoes
+   `toolset_name: "computer"` (a JPEG for `screenshot` / `zoom`, `"OK"` otherwise).
+4. It stops when the model ends its turn (`done`), the user stops it (`stopped`), it hits `maxSteps` model turns
+   (`error`, "Squall Uno took 80 steps and stopped before it finished. …"; a `message` lets it keep going), or an
+   error happens (`error`, with a plain sentence). A refusal ends with `error` too.
+5. While the user has the wheel (`takeover`), Squall Uno skips the rest of the actions it was given and waits before
+   its next model call; `handback` gives it a list of what the user did plus their note.
+6. A `message` to an ended session continues the same conversation. Conversations live in memory (the 10 newest
+   ended ones are kept); after a restart Squall Uno starts fresh with the old task as a reminder and the feed says so.
+7. Sessions and settings are kept in `uno/state.json` (no screenshots, no key). Sessions running when Squall closed
+   come back as `stopped`. Closing Squall stops (doesn't delete) the computers; `computerOff` removes one for good.
