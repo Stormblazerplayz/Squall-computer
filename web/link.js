@@ -82,7 +82,7 @@
     return state;
   }
 
-  // chat.sendLater { chatId, text, at (ISO) }, chat.cancelLater { id } and chat.sendLaterNow { id }
+  // chat.sendLater { chatId, text, at (ISO) }, chat.cancelLater { itemId } and chat.sendLaterNow { itemId }
   function laterRoute(view, a, type) {
     const list = (view && Array.isArray(view.later)) ? view.later : [];
     if (type === 'chat.sendLater') {
