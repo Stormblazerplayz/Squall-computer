@@ -446,9 +446,68 @@
         (live ? '<span class="uno-side-live"><i></i>' + live + ' live</span>' : '') + '</div>' + rows + '</div>';
     }
 
+    // ---------------- the Uno tab in the right pane: every computer at a glance ----------------
+
+    const pane = { stopping: false, err: '' };
+    function paneHTML() {
+      const head = n => '<div class="uno-pane-head" data-k="uno-pane-head"><span class="uno-side-bolt">' + ICONS.bolt + '</span><b>Squall Uno</b>' +
+        (n ? '<span class="uno-side-live"><i></i>' + n + ' live</span>' : '') +
+        (available ? '<button class="uno-pane-gear" data-uno-pane="settings" title="Squall Uno settings: API key, steps, Docker">Settings</button>' : '') + '</div>';
+      if (!available) return '<div class="uno-pane" data-k="uno-pane">' + head(0) + '<div class="uno-pane-note" data-k="uno-pane-note">Squall Uno needs the Squall app on this PC.</div></div>';
+      if (!ui.loaded) return '<div class="uno-pane" data-k="uno-pane">' + head(0) + '<div class="uno-pane-note" data-k="uno-pane-note">' + esc(ui.missing || 'Asking Squall Uno…') + '</div></div>';
+      const list = agents(), now = Date.now();
+      let live = 0;
+      const cards = list.map(a => {
+        const comp = computerOf(store, a.agentId), sess = currentSession(store, a.agentId);
+        const st = statusOf(comp, sess);
+        if (st.dot) live++;
+        const line = sess && isRunning(sess) ? nowLine(sess) : st.detail;
+        return '<button class="uno-pcard' + (st.dot ? ' live' : '') + ' s-' + st.key + '" data-k="uno-pcard:' + esc(a.agentId) + '" data-uno-open="' + esc(a.agentId) + '" title="Open ' + esc(a.agentName) + '’s computer">' +
+          iconFor(a, true) + '<span class="uno-pcard-t"><span class="uno-pcard-nm">' + esc(a.agentName) + '’s computer</span>' +
+          '<span class="uno-pcard-st">' + esc(st.label) + (sess && isRunning(sess) && sess.steps ? ' · step ' + esc(sess.steps) : '') + '</span>' +
+          (line ? '<span class="uno-pcard-now">' + esc(line) + '</span>' : '') + '</span>' +
+          (st.dot ? '<i class="uno-dot ' + (st.key === 'starting' ? 'starting' : 'live') + '"></i>' : '') + '</button>';
+      }).join('');
+      const s = store.settings || null;
+      let hints = '';
+      if (s && s.hasKey === false) hints += '<button class="uno-pane-hint" data-k="uno-hint-key" data-uno-pane="settings">Squall Uno needs an Anthropic API key first. Click to add it in Settings.</button>';
+      if (s && s.dockerReady === false) hints += '<div class="uno-pane-hint" data-k="uno-hint-docker">' + esc(s.dockerText || 'Squall Uno needs Docker Desktop running on this PC.') + '</div>';
+      const stopAll = anyRunning(store)
+        ? '<button class="uno-btn danger uno-pane-stop" data-k="uno-pane-stop" data-uno-pane="stopAll"' + (pane.stopping ? ' disabled' : '') + ' title="Stops every Squall Uno task on every computer">' + (pane.stopping ? 'Stopping everything…' : 'Stop everything') + '</button>' : '';
+      const recent = store.sessions.slice().sort((x, y) => (+y.startedAt || 0) - (+x.startedAt || 0)).slice(0, 8);
+      const rec = recent.length
+        ? recent.map(r => '<button class="uno-prow s-' + esc(r.state) + '" data-k="uno-prow:' + esc(r.id) + '" data-uno-open="' + esc(r.agentId) + '" title="Open ' + esc(r.agentName || 'that') + '’s computer">' +
+          '<span class="uno-prow-task">' + esc(r.task || 'A task') + '</span><span class="uno-prow-meta">' + esc((r.agentName || '') + ' · ' + sessionLabel(r) + (r.startedAt ? ' · ' + ago(+r.startedAt, now) : '')) + '</span></button>').join('')
+        : '<div class="uno-pane-note" data-k="uno-rec-none">No tasks yet. Click a computer and tell Squall Uno what to do.</div>';
+      return '<div class="uno-pane" data-k="uno-pane">' + head(live) +
+        (pane.err ? '<div class="uno-pane-err" data-k="uno-pane-err">' + esc(pane.err) + '</div>' : '') + hints + stopAll +
+        '<div class="uno-pane-sec" data-k="uno-sec-pcs">Computers</div><div class="uno-pcards" data-k="uno-pcards">' + cards + '</div>' +
+        '<div class="uno-pane-sec" data-k="uno-sec-rec">Recent tasks</div><div class="uno-prows" data-k="uno-prows">' + rec + '</div></div>';
+    }
+
+    async function paneDo(what) {
+      if (what === 'settings') {
+        const first = agents()[0];
+        open(ui.agentId || (first ? first.agentId : CHIEF));
+        ui.settings = true; render();
+        return;
+      }
+      if (what === 'stopAll' && !pane.stopping) {
+        pane.stopping = true; pane.err = ''; paneChanged();
+        const res = await op('stopAll', {});
+        pane.stopping = false;
+        pane.err = res.ok ? (res.stopped === 0 ? 'Nothing was running.' : '') : res.error;
+        if (pane.err) setTimeout(() => { pane.err = ''; paneChanged(); }, 6000);
+        refresh();
+      }
+    }
+    function paneChanged() { if (h.renderPaneSoon) h.renderPaneSoon(); }
+
     document.addEventListener('click', e => {
       const t = e.target && e.target.closest ? e.target : null;
       if (!t) return;
+      const pd = t.closest('[data-uno-pane]');
+      if (pd) { paneDo(pd.getAttribute('data-uno-pane')); return; }
       const row = t.closest('[data-uno-open]');
       if (row) { open(row.getAttribute('data-uno-open')); }
     });
@@ -577,7 +636,7 @@
     // ---------------- drawing ----------------
 
     let changeReq = 0;
-    function changed() { if (h.renderTeamSoon) h.renderTeamSoon(); if (ui.open) render(); }
+    function changed() { if (h.renderTeamSoon) h.renderTeamSoon(); if (h.renderPaneSoon) h.renderPaneSoon(); if (ui.open) render(); }
     function changedSoon() { if (!changeReq) changeReq = setTimeout(() => { changeReq = 0; changed(); }, 120); }
 
     function render() {
@@ -962,7 +1021,7 @@
     // first look
     if (available) refresh();
 
-    const api = { sidebarHTML, open, close, isOpen: () => ui.open, refresh, store };
+    const api = { sidebarHTML, paneHTML, liveCount: () => (available && ui.loaded ? agents().filter(a => statusOf(computerOf(store, a.agentId), currentSession(store, a.agentId)).dot).length : 0), open, close, isOpen: () => ui.open, refresh, store };
     root.SquallUnoUI = api;
     return api;
   }

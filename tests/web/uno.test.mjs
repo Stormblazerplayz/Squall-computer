@@ -238,3 +238,43 @@ test('wire does nothing without a page', () => {
   assert.equal(U.wire(null), null);
   assert.equal(U.wire({}), null);
 });
+
+test('the Uno tab shows every computer from the real state, and Stop everything asks the host', async () => {
+  const listeners = {};
+  globalThis.document = { hidden: false, addEventListener: (n, f) => { (listeners[n] = listeners[n] || []).push(f); }, getElementById: () => null, querySelector: () => null };
+  const realInterval = globalThis.setInterval;
+  globalThis.setInterval = (f, ms) => { const t = realInterval(f, ms); t.unref(); return t; };
+  const calls = [];
+  const state = {
+    ok: true, lastSeq: 0, events: [],
+    settings: { hasKey: false, dockerReady: true, dockerText: 'Docker is running.', maxSteps: 80 },
+    computers: [{ id: 'pc-chief', agentId: 'chief', agentName: 'Nova', state: 'on', sessionId: 'uno-aaaaaaaaaaaa', frameSeq: 1 }],
+    sessions: [{ id: 'uno-aaaaaaaaaaaa', computerId: 'pc-chief', agentId: 'chief', agentName: 'Nova', task: 'Find the weather in Paris', state: 'running', startedAt: T, steps: 3, now: 'Clicking Search' }],
+  };
+  const Bridge = { host: true, on: () => { }, call: async (name, body) => { calls.push(body.op); return body.op === 'stopAll' ? { ok: true, stopped: 1 } : state; } };
+  const paneRenders = [];
+  globalThis.SquallLinkCore = L;
+  try {
+    const ui = U.wire({ S: { agents: [{ name: 'Nova', color: '#F5B83D', lead: true }, { name: 'Quill', color: '#3D9BE9' }], lead: { name: 'Nova' } }, Bridge, renderPaneSoon: () => paneRenders.push(1) });
+    await new Promise(r => setTimeout(r, 20));
+    const html = ui.paneHTML();
+    assert.match(html, /Nova’s computer/);
+    assert.match(html, /Quill’s computer/);
+    assert.match(html, /Find the weather in Paris/);
+    assert.match(html, /1 live/);
+    assert.match(html, /needs an Anthropic API key/);
+    assert.match(html, /data-uno-pane="stopAll"/);
+    assert.ok(!/demo|sample|lorem/i.test(html));
+    assert.equal(ui.liveCount(), 1);
+    assert.ok(paneRenders.length > 0);
+    const target = { closest: sel => sel === '[data-uno-pane]' ? { getAttribute: () => 'stopAll' } : null };
+    listeners.click.forEach(f => f({ target }));
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(calls.includes('stopAll'));
+  } finally {
+    globalThis.setInterval = realInterval;
+    delete globalThis.document;
+    delete globalThis.SquallUnoUI;
+    delete globalThis.SquallLinkCore;
+  }
+});

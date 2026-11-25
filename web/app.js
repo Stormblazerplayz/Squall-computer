@@ -48,7 +48,7 @@
     mirror: {},      // agent name -> { entries: [], session, status } : live view of that agent's real session
     typing: {},      // chat id -> { agent name: when it started } : who is working on a reply in that chat
     desk: [],        // every desktop session on this PC (title, transcript, modified), newest first (a list; sessions above is the map)
-    rightMode: 'board', // the right pane: 'board' (the team board), 'computer', 'live' (one agent's steps), 'sessions', 'vault' or 'todo'
+    rightMode: 'board', // the right pane: 'board' (the team board), 'computer', 'uno' (Squall Uno: every agent's own computer), 'live' (one agent's steps), 'sessions', 'vault' or 'todo'
     sessView: null,  // a session's transcript path while Storm reads it in the centre (read-only)
     sessMirror: {},  // transcript path -> { entries, status, title, loading } for the session being read
     usage: null,     // plan usage from the status line hook (null until it's connected)
@@ -2034,6 +2034,7 @@
   if (window.SquallUno) window.SquallUno.wire({
     S, Bridge, esc,
     renderTeamSoon: () => renderTeamSoon(),
+    renderPaneSoon: () => unoPaneSoon(),
     sfx: name => sfx(name),
     beforeOpen: () => { closeSessionView(); if (S.noteView) closeNote(); },
     onClose: () => { renderAll(); $('#input').focus(); },
@@ -2895,6 +2896,7 @@
     const a = S.rightMode === 'live' ? S.byName[S.live] : null;
     $('#live-tabs').innerHTML = '<button class="ltab board-tab' + (S.rightMode === 'board' ? ' on' : '') + '" data-boardtab="1" title="Every bot at a glance">Board</button>' +
       '<button class="ltab comp-tab' + (S.rightMode === 'computer' ? ' on' : '') + '" data-comptab="1" title="Squall’s own computer (Starx): watch it, click, type">Starx</button>' +
+      (window.SquallUnoUI ? '<button class="ltab uno-tab' + (S.rightMode === 'uno' ? ' on' : '') + '" data-unotab="1" title="Squall Uno: every agent’s own computer, live">Uno' + (window.SquallUnoUI.liveCount() ? '<span class="sess-count uno-live-count">' + window.SquallUnoUI.liveCount() + '</span>' : '') + '</button>' : '') +
       (a ? '<button class="ltab on' + (agentBusy(a) ? ' working' : '') + '" data-live="' + esc(a.name) + '" style="--c:' + esc(a.color) + '"><i></i>' + esc(a.name) + '</button>' : '');
   }
   // ---------- the team board: a card per bot with what it's doing, its task, its last result and the files it touched ----------
@@ -3076,11 +3078,22 @@
   // a page left on screen with nobody touching it: held redraws still land every 15 s, so it is never stale for long
   setInterval(() => { if (redrawHeld && !document.hidden && !flushing) { flushing = true; redrawHeld = false; try { renderAll(); } finally { flushing = false; } } }, 15000);
   idleCheck();
+  // ---------- the Uno tab: every agent's own Squall Uno computer at a glance (the cards open the live view in the centre) ----------
+  function renderUnoPane() {
+    patchHTML($('#live-body'), window.SquallUnoUI ? window.SquallUnoUI.paneHTML() : '<div class="live-empty" data-k="none">Squall Uno isn’t loaded</div>');
+    $('#live-foot').innerHTML = '<span>Click a computer to watch it live and give it a task</span>';
+  }
+  let unoPaneTimer = 0;
+  function unoPaneSoon() {
+    if (unoPaneTimer) return;
+    unoPaneTimer = setTimeout(() => { unoPaneTimer = 0; if (S.rightMode === 'uno') renderLive(); else if (!S.winMin && !redrawHold()) renderLiveTabs(); }, 120);
+  }
   function renderLive() {
     if (redrawHold()) return;
     if (S.winMin) { S.renderPending = true; return; }
     if (S.rightMode === 'board') { renderLiveTabs(); renderBoardPane(); return; }
     if (S.rightMode === 'computer') { renderLiveTabs(); renderComputerPane(); return; }
+    if (S.rightMode === 'uno') { renderLiveTabs(); renderUnoPane(); return; }
     if (S.rightMode === 'sessions') { renderLiveTabs(); renderSessionsPane(); return; }
     if (S.rightMode === 'vault') { renderLiveTabs(); renderVaultPane(); return; }
     if (S.rightMode === 'todo') { renderLiveTabs(); renderTodoPane(); return; }
@@ -3299,6 +3312,7 @@
     // the Vault button opens Coreshell (Storm, 19 Oct: "Put coreshell into the vault button")
     if (t.closest('[data-coreshell]')) { Bridge.call('openCoreshell').catch(err => addMessage(activeChat(), { who: APP, kind: 'error', text: 'Couldn’t open Coreshell: ' + err.message })); return; }
     if (t.closest('[data-comptab]')) { S.rightMode = 'computer'; renderLive(); return; }
+    if (t.closest('[data-unotab]')) { S.rightMode = 'uno'; renderLive(); if (window.SquallUnoUI) window.SquallUnoUI.refresh(); return; }
     const ttb = t.closest('[data-todotab]');
     if (ttb) { S.rightMode = 'todo'; renderLive(); todoLoad(); return; }
     const tdo = t.closest('[data-todo]');
