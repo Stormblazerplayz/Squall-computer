@@ -263,6 +263,154 @@
     return { w: Math.floor(width * scale), h: Math.floor(height * scale) };
   }
 
+  // ---------------------------------------------------------------- motion (what the live screen animates)
+  // Only real events and frames move anything here: a glide to where the mouse really went, a ripple where it really
+  // clicked, the text it really typed, the keys it really pressed. With "reduce motion" on, everything shows at once.
+
+  const GLIDE_MS = 250;             // the cursor's glide to a new spot
+  const DRAG_MS = 380;              // a drag's glide and trail
+  const TICKER_MAX_MS = 1200;       // typed text always finishes within this
+  const TICKER_CHAR_MS = 45;        // ...and short text types at this pace
+
+  // Ease out (cubic): quick start, soft landing. t from 0 to 1.
+  function easeOut(t) {
+    const k = Math.max(0, Math.min(1, +t || 0));
+    return 1 - Math.pow(1 - k, 3);
+  }
+
+  // Where a glide from `from` to `to` that began at `start` is at `now` (ms): { x, y, done }. No `from`: already there.
+  function glideAt(from, to, start, now, ms) {
+    if (!to) return null;
+    const d = ms == null ? GLIDE_MS : +ms;
+    if (!from || !(d > 0)) return { x: to.x, y: to.y, done: true };
+    const t = (now - start) / d;
+    if (!(t < 1)) return { x: to.x, y: to.y, done: true };
+    const k = easeOut(t);
+    return { x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k, done: false };
+  }
+
+  // How fast typed text appears: { step: ms per character, total: ms }. Short text types at a steady pace;
+  // long text speeds up so it always finishes within maxMs.
+  function tickerTiming(length, maxMs, charMs) {
+    const n = Math.max(0, Math.floor(+length || 0));
+    const max = maxMs == null ? TICKER_MAX_MS : +maxMs, per = charMs == null ? TICKER_CHAR_MS : +charMs;
+    if (!n || !(max > 0) || !(per > 0)) return { step: 0, total: 0 };
+    const step = Math.min(per, max / n);
+    return { step, total: step * n };
+  }
+
+  // How many characters of the typed text show `elapsed` ms after it starts (the first one right away).
+  function tickerShown(length, elapsed, maxMs, charMs) {
+    const n = Math.max(0, Math.floor(+length || 0));
+    const t = tickerTiming(n, maxMs, charMs);
+    if (!n) return 0;
+    if (!(t.step > 0) || !(elapsed >= 0)) return elapsed >= 0 ? n : 1;
+    return Math.max(1, Math.min(n, Math.floor(elapsed / t.step) + 1));
+  }
+
+  // What a "type" event typed: its text reads 'Typed "hello"'. '' when it can't tell (nothing is made up).
+  function typedText(e) {
+    if (!e || e.kind !== 'type') return '';
+    const m = /^\s*Typ(?:ed|ing)\s+"([\s\S]*)"\s*$/.exec(String(e.text || ''));
+    return m ? m[1] : '';
+  }
+
+  const KEY_NAMES = {
+    ctrl: 'Ctrl', control: 'Ctrl', alt: 'Alt', option: 'Alt', shift: 'Shift', super: 'Win', meta: 'Win', win: 'Win', cmd: 'Win', command: 'Win',
+    return: 'Enter', enter: 'Enter', kp_enter: 'Enter', escape: 'Esc', esc: 'Esc', backspace: 'Backspace', delete: 'Delete', del: 'Delete',
+    tab: 'Tab', iso_left_tab: 'Tab', space: 'Space', up: '↑', down: '↓', left: '←', right: '→',
+    page_up: 'Page Up', prior: 'Page Up', pageup: 'Page Up', page_down: 'Page Down', next: 'Page Down', pagedown: 'Page Down',
+    home: 'Home', end: 'End', insert: 'Insert', caps_lock: 'Caps Lock', print: 'Print Screen', menu: 'Menu',
+    minus: '-', plus: '+', equal: '=', period: '.', comma: ',', slash: '/', backslash: '\\', semicolon: ';', apostrophe: '\'',
+    grave: '`', bracketleft: '[', bracketright: ']',
+  };
+
+  // One key or chord, the way it looks on a keyboard: "ctrl+l" -> "Ctrl + L", "Return" -> "Enter", "ctrl++" -> "Ctrl + +".
+  function prettyKey(chord) {
+    const s = String(chord == null ? '' : chord).trim();
+    if (!s) return '';
+    return s.split(/\+(?=.)/).map(part => {
+      const raw = part.trim();
+      if (!raw) return '+';
+      const low = raw.toLowerCase();
+      const name = KEY_NAMES[low] || KEY_NAMES[low.replace(/_[lr]$/, '')];
+      if (name) return name;
+      if (/^f\d{1,2}$/.test(low)) return raw.toUpperCase();
+      if (raw.length === 1) return raw.toUpperCase();
+      return raw.charAt(0).toUpperCase() + raw.slice(1);
+    }).join(' + ');
+  }
+
+  // A row of keys pressed one after another ("ctrl+l Return", or "ctrl+l, Return" from the feed): "Ctrl + L, Enter".
+  function prettyKeys(text) {
+    return String(text == null ? '' : text).split(/[\s,]+/).filter(Boolean).map(prettyKey).join(', ');
+  }
+
+  // The keycap chip for a "key" or "hold_key" event, from its text ("Pressed ctrl+l, Return 2 times", "Held shift for
+  // 1 second"): { keys: [["Ctrl", "L"], ["Enter"]], label: "Ctrl + L, Enter ×2", times, hold }, or null.
+  function keyChip(e) {
+    if (!e || (e.kind !== 'key' && e.kind !== 'hold_key')) return null;
+    const text = String(e.text || '');
+    let keys = '', times = 1;
+    const hold = e.kind === 'hold_key';
+    if (hold) {
+      const m = /^\s*H(?:eld|olding)\s+(.+?)\s+for\s+/.exec(text);
+      if (m) keys = m[1];
+    } else {
+      const m = /^\s*Press(?:ed|ing)\s+([\s\S]+?)(?:\s+(\d+)\s+times)?\s*$/.exec(text);
+      if (m) { keys = m[1]; times = m[2] ? Math.max(1, +m[2]) : 1; }
+    }
+    const list = keys.split(/[\s,]+/).filter(k => k && k.indexOf('…') < 0).map(prettyKey).filter(Boolean);   // a key cut short by the feed is left out
+    if (!list.length) return null;
+    const label = list.join(', ') + (times > 1 ? ' ×' + times : '');
+    return { keys: list.map(k => k.split(' + ')), label, times, hold };
+  }
+
+  // Which way a "scroll" event went, from its text ("Scrolled down 3 at (640, 400)"): up | down | left | right | ''.
+  function scrollDir(e) {
+    if (!e || e.kind !== 'scroll') return '';
+    const m = /\b(up|down|left|right)\b/i.exec(String(e.text || ''));
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  // What the live screen shows for one real event, or null:
+  //   { kind: 'click', at, count }      a ripple (count 2 or 3 for double and triple clicks), the cursor glides there
+  //   { kind: 'move', to }              the cursor glides there
+  //   { kind: 'drag', from, to }        a short trail, and the cursor glides along it
+  //   { kind: 'type', text }            the typed text appears letter by letter near the cursor
+  //   { kind: 'key', keys, label, … }   a keycap chip near the cursor
+  //   { kind: 'scroll', dir, at }       an arrow at the spot (at null: where the cursor is)
+  //   { kind: 'flash', box }            a camera flash on the screen's edge (a zoom also outlines what it looked at)
+  function motionOf(e) {
+    if (!isEvent(e)) return null;
+    const pt = num(e.x) && num(e.y) ? { x: +e.x, y: +e.y } : null;
+    const end = num(e.x2) && num(e.y2) ? { x: +e.x2, y: +e.y2 } : null;
+    switch (e.kind) {
+      case 'drag':
+        if (pt && end) return { kind: 'drag', from: pt, to: end };
+        return pt || end ? { kind: 'move', to: end || pt } : null;
+      case 'move': case 'cursor': case 'mouse_down': case 'mouse_up':
+        return pt ? { kind: 'move', to: pt } : null;
+      case 'type': { const text = typedText(e); return text ? { kind: 'type', text } : null; }
+      case 'key': case 'hold_key': { const k = keyChip(e); return k ? Object.assign({ kind: 'key' }, k) : null; }
+      case 'scroll': { const dir = scrollDir(e); return dir ? { kind: 'scroll', dir, at: pt } : null; }
+      case 'screenshot': return { kind: 'flash', box: null };
+      case 'zoom':
+        return { kind: 'flash', box: pt && end ? { x: Math.min(pt.x, end.x), y: Math.min(pt.y, end.y), w: Math.abs(end.x - pt.x), h: Math.abs(end.y - pt.y) } : null };
+    }
+    if (CLICK_KINDS.indexOf(e.kind) >= 0) return pt ? { kind: 'click', at: pt, count: e.kind === 'double_click' ? 2 : e.kind === 'triple_click' ? 3 : 1 } : null;
+    return null;
+  }
+
+  // A drag's trail as a box-relative line: { left, top } (percent, where it starts), length (px) and angle (degrees),
+  // for a box boxW × boxH px showing a width × height screen. Null when anything is missing.
+  function trailGeom(from, to, width, height, boxW, boxH) {
+    const a = from && framePct(from.x, from.y, width, height), b = to && framePct(to.x, to.y, width, height);
+    if (!a || !b || !(boxW > 0) || !(boxH > 0)) return null;
+    const dx = (b.left - a.left) / 100 * boxW, dy = (b.top - a.top) / 100 * boxH;
+    return { left: a.left, top: a.top, length: Math.sqrt(dx * dx + dy * dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
+  }
+
   // ---------------------------------------------------------------- settings words
 
   const clampSteps = v => Math.max(10, Math.min(300, Math.round(+v || 0) || 80));
@@ -385,9 +533,8 @@
       if (!fresh) return;
       const comp = watchedComputer();
       const here = ui.open && comp && fresh.computerId === comp.id;
-      // your own clicks from this window already rippled when you clicked
-      if (here && isClick(fresh) && !(fresh.who === 'you' && Date.now() - ui.localClickAt < 4000)) ripple(+fresh.x, +fresh.y, fresh.who === 'you');
-      if (here && num(fresh.x) && num(fresh.y) && fresh.kind !== 'scroll') moveCursor(+fresh.x, +fresh.y);
+      // the screen shows what it just did: the cursor glides, clicks ripple, typing and keys show up near the cursor
+      if (here) animate(fresh);
       // a session's last word changes the state too: ask once, quietly
       if (/^(done|stopped|error|takeover|handback|start)$/.test(fresh.kind)) setTimeout(() => refresh(), 250);
       changedSoon();
@@ -750,35 +897,258 @@
       else if (!frame) html = '<div class="uno-empty-ic spin">' + svg('clock', 28) + '</div><b>Waiting for the screen…</b>';
       if (el._html !== html) { el.innerHTML = html; el._html = html; }
       el.hidden = !html;
-      const img = $u('.uno-img');
-      if (img && html) img.hidden = true;
+      if (html && view) view.querySelectorAll('.uno-box .uno-img').forEach(im => { im.hidden = true; });
     }
 
     function paintFrame() {
       const comp = watchedComputer();
       const frame = comp ? store.frames[comp.id] : null;
-      const img = $u('.uno-img');
-      if (!img) return;
-      if (!frame || !comp || comp.state === 'off') { if (img.getAttribute('src')) img.removeAttribute('src'); img.hidden = true; const c = $u('.uno-cursor'); if (c) c.hidden = true; return; }
-      if (frame.width && frame.height && (frame.width !== ui.screenW || frame.height !== ui.screenH)) { ui.screenW = frame.width; ui.screenH = frame.height; layoutScreen(); }
-      if (ui.shownSeq !== frame.seq || !img.getAttribute('src')) {
-        ui.shownSeq = frame.seq;
-        img.src = 'data:image/jpeg;base64,' + frame.jpeg;
+      const list = screenImgs();
+      if (!list.length) return;
+      if (!frame || !comp || comp.state === 'off') {
+        for (const im of list) { if (im.getAttribute('src')) im.removeAttribute('src'); im.hidden = true; im.classList.remove('top', 'fading', 'in'); }
+        fade.token++;
+        const c = $u('.uno-cursor'); if (c) c.hidden = true;
+        return;
       }
-      img.hidden = false;
+      if (frame.width && frame.height && (frame.width !== ui.screenW || frame.height !== ui.screenH)) { ui.screenW = frame.width; ui.screenH = frame.height; layoutScreen(); }
+      const front = list[fade.front] || list[0];
+      if (ui.shownSeq !== frame.seq || !front.getAttribute('src')) {
+        ui.shownSeq = frame.seq;
+        showJpeg(list, 'data:image/jpeg;base64,' + frame.jpeg);
+      }
+      for (const im of list) im.hidden = !im.getAttribute('src');
       paintEmpty(comp, statusOf(comp, currentSession(store, ui.agentId)));
-      if (frame.cursorX != null && frame.cursorY != null) moveCursor(+frame.cursorX, +frame.cursorY);
+      // a frame grabbed just before the newest event can still show the mouse where it was: don't glide back for it
+      if (frame.cursorX != null && frame.cursorY != null && !(Date.now() - glide.eventAt < 350)) moveCursor(+frame.cursorX, +frame.cursorY);
     }
 
-    function moveCursor(x, y) {
+    // ---------------- motion on the live screen (only from real events and frames) ----------------
+
+    const tnow = () => (root.performance && typeof root.performance.now === 'function' ? root.performance.now() : Date.now());
+    const raf = f => (typeof root.requestAnimationFrame === 'function' ? root.requestAnimationFrame(f) : setTimeout(() => f(tnow()), 16));
+    const unraf = id => { if (!id) return; if (typeof root.cancelAnimationFrame === 'function') root.cancelAnimationFrame(id); else clearTimeout(id); };
+    function reduced() {
+      try { return !!(root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
+    }
+
+    // The layer the effects live in, and a second picture for the crossfade. Added once per view, inside the screen box.
+    function ensureFx() {
+      const box = $u('.uno-box');
+      if (!box) return null;
+      let fx = box.querySelector('.uno-fx');
+      if (fx) return fx;
+      const img = box.querySelector('.uno-img');
+      if (img && box.querySelectorAll('.uno-img').length < 2) {
+        const b = document.createElement('img');
+        b.className = 'uno-img'; b.alt = ''; b.draggable = false; b.hidden = true;
+        img.insertAdjacentElement('afterend', b);
+      }
+      fade.front = 0; fade.token++;
+      fx = document.createElement('div');
+      fx.className = 'uno-fx';
+      fx.setAttribute('aria-hidden', 'true');
+      fx.innerHTML = '<div class="uno-camflash"></div><div class="uno-bubble uno-typing" hidden></div><div class="uno-bubble uno-keycap" hidden></div>';
+      box.appendChild(fx);
+      return fx;
+    }
+    function screenImgs() { ensureFx(); return view ? Array.from(view.querySelectorAll('.uno-box .uno-img')) : []; }
+
+    // New frames fade in over the old one (two stacked pictures take turns), unless motion is reduced.
+    const fade = { front: 0, token: 0 };
+    function showJpeg(list, src) {
+      const front = list[fade.front] || list[0];
+      const back = list.length > 1 ? list[1 - fade.front] : null;
+      fade.token++;
+      if (!back || reduced() || !front.getAttribute('src') || front.hidden) {
+        front.src = src; front.hidden = false;
+        front.classList.remove('fading', 'in'); front.classList.add('top');
+        if (back) { back.classList.remove('top', 'fading', 'in'); if (back.getAttribute('src')) back.removeAttribute('src'); back.hidden = true; }
+        return;
+      }
+      const token = fade.token;
+      back.classList.remove('in');
+      back.classList.add('top', 'fading');
+      back.src = src;
+      back.hidden = false;
+      const go = () => {
+        if (token !== fade.token) return;
+        front.classList.remove('top');
+        void back.offsetWidth;
+        back.classList.add('in');
+        fade.front = list.indexOf(back);
+      };
+      if (typeof back.decode === 'function') back.decode().then(go, go); else go();
+    }
+
+    // The cursor glides (eased, ~250 ms) to each new real position.
+    const glide = { from: null, to: null, at: null, start: 0, ms: GLIDE_MS, raf: 0, eventAt: 0 };
+    function placeCursor(c, pt) {
+      const p = framePct(pt.x, pt.y, ui.screenW, ui.screenH);
+      if (!p) return;
+      c.style.left = p.left + '%'; c.style.top = p.top + '%';
+    }
+    function moveCursor(x, y, ms, from) {
       const c = $u('.uno-cursor');
       if (!c) return;
-      const p = framePct(x, y, ui.screenW, ui.screenH);
-      if (!p) { c.hidden = true; return; }
-      c.hidden = false;
-      c.style.left = p.left + '%'; c.style.top = p.top + '%';
-      ui.cursor = { x: Math.round(x), y: Math.round(y) };
+      if (!framePct(x, y, ui.screenW, ui.screenH)) { c.hidden = true; glide.at = null; return; }
+      const to = { x: +x, y: +y };
+      ui.cursor = { x: Math.round(to.x), y: Math.round(to.y) };
       paintChip();
+      if (from && !c.hidden) { glide.at = { x: +from.x, y: +from.y }; placeCursor(c, glide.at); }   // a drag glides from where it started
+      else if (!c.hidden && glide.to && glide.to.x === to.x && glide.to.y === to.y) return;          // already there or on its way
+      if (c.hidden || !glide.at || reduced()) {
+        unraf(glide.raf); glide.raf = 0;
+        glide.from = null; glide.to = to; glide.at = to;
+        placeCursor(c, to);
+        c.hidden = false;
+        return;
+      }
+      glide.from = { x: glide.at.x, y: glide.at.y }; glide.to = to; glide.start = tnow(); glide.ms = ms || GLIDE_MS;
+      c.hidden = false;
+      if (!glide.raf) glide.raf = raf(stepCursor);
+    }
+    function stepCursor() {
+      glide.raf = 0;
+      const c = $u('.uno-cursor');
+      if (!c || !glide.to) return;
+      const p = glideAt(glide.from, glide.to, glide.start, tnow(), glide.ms);
+      glide.at = { x: p.x, y: p.y };
+      placeCursor(c, glide.at);
+      if (!p.done) glide.raf = raf(stepCursor);
+    }
+    // Where effects that follow the cursor go: where it is heading, else where it is.
+    const cursorSpot = () => glide.to || glide.at || (ui.cursor ? { x: ui.cursor.x, y: ui.cursor.y } : null);
+
+    // One real event, drawn on the screen.
+    function animate(e) {
+      const m = motionOf(e);
+      if (!m) return;
+      const mine = e.who === 'you';
+      if (m.kind === 'click' || m.kind === 'move' || m.kind === 'drag') glide.eventAt = Date.now();
+      switch (m.kind) {
+        case 'click':
+          // your own clicks from this window already rippled when you clicked
+          if (!(mine && Date.now() - ui.localClickAt < 4000)) { ripple(m.at.x, m.at.y, mine); if (m.count > 1) setTimeout(() => ripple(m.at.x, m.at.y, mine), 140); }
+          moveCursor(m.at.x, m.at.y);
+          break;
+        case 'move': moveCursor(m.to.x, m.to.y); break;
+        case 'drag': trail(m.from, m.to, mine); moveCursor(m.to.x, m.to.y, DRAG_MS, m.from); break;
+        case 'type': typeTicker(m.text); break;
+        case 'key': keycap(m); break;
+        case 'scroll': scrollArrow(m.dir, m.at || cursorSpot()); break;
+        case 'flash': camFlash(m.box); break;
+      }
+    }
+
+    // Puts a bubble next to a point on the screen, flipped so it stays inside the picture.
+    function placeNear(el, pt) {
+      const p = pt ? framePct(pt.x, pt.y, ui.screenW, ui.screenH) : null;
+      const at = p || { left: 50, top: 50 };
+      el.style.left = at.left + '%'; el.style.top = at.top + '%';
+      el.classList.toggle('flip-x', at.left > 62);
+      el.classList.toggle('flip-y', at.top < 22);
+    }
+    function bubbleOut(el, delay) {
+      clearTimeout(el._out);
+      el._out = setTimeout(() => {
+        el.classList.add('out');
+        el._out = setTimeout(() => { el.hidden = true; el.classList.remove('out'); }, reduced() ? 0 : 320);
+      }, delay);
+    }
+
+    // A "type" event: the text it typed appears letter by letter near the cursor (≤1.2 s however long), then fades.
+    const ticker = { raf: 0, start: 0, chars: [] };
+    function typeTicker(text) {
+      const fx = ensureFx(), el = fx && fx.querySelector('.uno-typing');
+      if (!el) return;
+      unraf(ticker.raf); ticker.raf = 0;
+      clearTimeout(el._out);
+      placeNear(el, cursorSpot());
+      el.classList.remove('out');
+      el.hidden = false;
+      ticker.chars = Array.from(text);
+      if (reduced()) { el.classList.remove('typing'); el.textContent = text; bubbleOut(el, 1600); return; }
+      el.classList.add('typing');
+      el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
+      ticker.start = tnow();
+      const step = () => {
+        ticker.raf = 0;
+        const n = tickerShown(ticker.chars.length, tnow() - ticker.start);
+        const shown = ticker.chars.slice(0, n).join('');
+        if (el.textContent !== shown) el.textContent = shown;
+        if (n < ticker.chars.length) ticker.raf = raf(step);
+        else { el.classList.remove('typing'); bubbleOut(el, 900); }
+      };
+      step();
+    }
+
+    // A "key" event: a keycap chip like [Ctrl] + [L], briefly.
+    function keycap(k) {
+      const fx = ensureFx(), el = fx && fx.querySelector('.uno-keycap');
+      if (!el) return;
+      clearTimeout(el._out);
+      placeNear(el, cursorSpot());
+      el.innerHTML = k.keys.map(chord => chord.map(key => '<kbd>' + esc(key) + '</kbd>').join('<b>+</b>')).join('<span class="uno-kc-sep">,</span>') +
+        (k.times > 1 ? '<span class="uno-kc-x">×' + esc(String(k.times)) + '</span>' : '') + (k.hold ? '<span class="uno-kc-x">held</span>' : '');
+      el.setAttribute('title', k.label);
+      el.classList.remove('out', 'pop');
+      el.hidden = false;
+      if (!reduced()) { void el.offsetWidth; el.classList.add('pop'); }
+      bubbleOut(el, 1100);
+    }
+
+    // A drag: a short line from where it started to where it let go, drawn as it goes.
+    function trail(from, to, mine) {
+      const fx = ensureFx(), box = $u('.uno-box');
+      if (!fx || !box) return;
+      const g = trailGeom(from, to, ui.screenW, ui.screenH, box.clientWidth, box.clientHeight);
+      if (!g || g.length < 2) return;
+      const el = document.createElement('div');
+      el.className = 'uno-trail' + (mine ? ' you' : '') + (reduced() ? ' still' : '');
+      el.style.left = g.left + '%'; el.style.top = g.top + '%';
+      el.style.width = g.length.toFixed(1) + 'px';
+      el.style.transform = 'rotate(' + g.angle.toFixed(2) + 'deg)';
+      el.style.setProperty('--uno-drag', DRAG_MS + 'ms');
+      el.innerHTML = '<i></i>';
+      fx.appendChild(el);
+      setTimeout(() => el.remove(), DRAG_MS + 900);
+      const all = fx.querySelectorAll('.uno-trail');
+      for (let i = 0; i < all.length - 4; i++) all[i].remove();
+    }
+
+    // A scroll: a short arrow at the spot, pointing the way it went.
+    function scrollArrow(dir, at) {
+      const fx = ensureFx();
+      const p = at ? framePct(at.x, at.y, ui.screenW, ui.screenH) : null;
+      if (!fx || !p) return;
+      const el = document.createElement('div');
+      el.className = 'uno-scrollfx d-' + dir + (reduced() ? ' still' : '');
+      el.style.left = p.left + '%'; el.style.top = p.top + '%';
+      el.innerHTML = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v15M6 13l6 6 6-6"/></svg>';
+      fx.appendChild(el);
+      setTimeout(() => el.remove(), 800);
+      const all = fx.querySelectorAll('.uno-scrollfx');
+      for (let i = 0; i < all.length - 3; i++) all[i].remove();
+    }
+
+    // A screenshot or zoom: a quick, soft flash on the screen's edge (and, for a zoom, the part it looked at).
+    function camFlash(box) {
+      if (reduced()) return;
+      const fx = ensureFx();
+      if (!fx) return;
+      const f = fx.querySelector('.uno-camflash');
+      if (f) { f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
+      if (box && box.w > 0 && box.h > 0) {
+        const a = framePct(box.x, box.y, ui.screenW, ui.screenH), b = framePct(box.x + box.w, box.y + box.h, ui.screenW, ui.screenH);
+        if (!a || !b) return;
+        const el = document.createElement('div');
+        el.className = 'uno-zoomfx';
+        el.style.left = a.left + '%'; el.style.top = a.top + '%';
+        el.style.width = (b.left - a.left) + '%'; el.style.height = (b.top - a.top) + '%';
+        fx.appendChild(el);
+        setTimeout(() => el.remove(), 1000);
+      }
     }
 
     function paintChip() {
@@ -1030,6 +1400,7 @@
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
     computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, nowLine, ago,
     feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
+    easeOut, glideAt, tickerTiming, tickerShown, typedText, prettyKey, prettyKeys, keyChip, scrollDir, motionOf, trailGeom,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SquallUno = api;

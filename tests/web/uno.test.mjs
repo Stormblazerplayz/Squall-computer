@@ -214,6 +214,112 @@ test('a click on the shown picture maps to the computer’s pixels, letterbox an
   assert.deepEqual(U.fitBox(0, 400, 1280, 800), { w: 0, h: 0 });
 });
 
+test('motion: key names look like keys', () => {
+  assert.equal(U.prettyKey('ctrl+l'), 'Ctrl + L');
+  assert.equal(U.prettyKey('Return'), 'Enter');
+  assert.equal(U.prettyKey('ctrl+shift+t'), 'Ctrl + Shift + T');
+  assert.equal(U.prettyKey('super'), 'Win');
+  assert.equal(U.prettyKey('Control_L+Page_Down'), 'Ctrl + Page Down');
+  assert.equal(U.prettyKey('alt+F4'), 'Alt + F4');
+  assert.equal(U.prettyKey('ctrl++'), 'Ctrl + +');
+  assert.equal(U.prettyKey('ctrl+minus'), 'Ctrl + -');
+  assert.equal(U.prettyKey('Escape'), 'Esc');
+  assert.equal(U.prettyKey('Up'), '↑');
+  assert.equal(U.prettyKey('BackSpace'), 'Backspace');
+  assert.equal(U.prettyKey(''), '');
+  assert.equal(U.prettyKeys('ctrl+l Return'), 'Ctrl + L, Enter');
+  assert.equal(U.prettyKeys('ctrl+l, Return'), 'Ctrl + L, Enter');
+});
+
+test('motion: keycap chips come from the real key events only', () => {
+  assert.deepEqual(U.keyChip({ kind: 'key', text: 'Pressed ctrl+l' }), { keys: [['Ctrl', 'L']], label: 'Ctrl + L', times: 1, hold: false });
+  const many = U.keyChip({ kind: 'key', text: 'Pressed ctrl+a, Delete 3 times' });
+  assert.deepEqual(many.keys, [['Ctrl', 'A'], ['Delete']]);
+  assert.equal(many.label, 'Ctrl + A, Delete ×3');
+  assert.equal(U.keyChip({ kind: 'hold_key', text: 'Held shift for 1 second' }).label, 'Shift');
+  assert.equal(U.keyChip({ kind: 'hold_key', text: 'Held shift for 1 second' }).hold, true);
+  assert.deepEqual(U.keyChip({ kind: 'key', text: 'Pressed Tab, Tab, Ret…' }).keys, [['Tab'], ['Tab']]);   // the cut-off key is left out
+  assert.equal(U.keyChip({ kind: 'key', text: '' }), null);
+  assert.equal(U.keyChip({ kind: 'key', text: 'Something else' }), null);
+  assert.equal(U.keyChip({ kind: 'type', text: 'Pressed ctrl+l' }), null);
+});
+
+test('motion: typed text and scroll direction are read from the event, never made up', () => {
+  assert.equal(U.typedText({ kind: 'type', text: 'Typed "weather in Paris"' }), 'weather in Paris');
+  assert.equal(U.typedText({ kind: 'type', text: 'Typed "say "hi" there"' }), 'say "hi" there');
+  assert.equal(U.typedText({ kind: 'type', text: 'Typed "a long one…"' }), 'a long one…');
+  assert.equal(U.typedText({ kind: 'type', text: 'Typed' }), '');
+  assert.equal(U.typedText({ kind: 'key', text: 'Typed "x"' }), '');
+  assert.equal(U.scrollDir({ kind: 'scroll', text: 'Scrolled down 3 at (640, 400)' }), 'down');
+  assert.equal(U.scrollDir({ kind: 'scroll', text: 'Scrolled up 5' }), 'up');
+  assert.equal(U.scrollDir({ kind: 'scroll', text: 'Scrolled' }), '');
+  assert.equal(U.scrollDir({ kind: 'click', text: 'Scrolled up' }), '');
+});
+
+test('motion: each real event maps to one effect on the screen', () => {
+  const ev = (kind, extra) => Object.assign({ seq: 1, kind, text: '' }, extra || {});
+  assert.deepEqual(U.motionOf(ev('click', { x: 10, y: 20 })), { kind: 'click', at: { x: 10, y: 20 }, count: 1 });
+  assert.equal(U.motionOf(ev('double_click', { x: 1, y: 2 })).count, 2);
+  assert.equal(U.motionOf(ev('triple_click', { x: 1, y: 2 })).count, 3);
+  assert.equal(U.motionOf(ev('click')), null);   // a click without a spot: no ripple anywhere
+  assert.deepEqual(U.motionOf(ev('move', { x: 5, y: 6 })), { kind: 'move', to: { x: 5, y: 6 } });
+  assert.deepEqual(U.motionOf(ev('drag', { x: 1, y: 2, x2: 30, y2: 40 })), { kind: 'drag', from: { x: 1, y: 2 }, to: { x: 30, y: 40 } });
+  assert.deepEqual(U.motionOf(ev('drag', { x: 1, y: 2 })), { kind: 'move', to: { x: 1, y: 2 } });
+  assert.deepEqual(U.motionOf(ev('type', { text: 'Typed "hi"' })), { kind: 'type', text: 'hi' });
+  assert.equal(U.motionOf(ev('type', { text: '' })), null);
+  assert.equal(U.motionOf(ev('key', { text: 'Pressed Return' })).label, 'Enter');
+  assert.deepEqual(U.motionOf(ev('scroll', { text: 'Scrolled down 3 at (4, 5)', x: 4, y: 5 })), { kind: 'scroll', dir: 'down', at: { x: 4, y: 5 } });
+  assert.deepEqual(U.motionOf(ev('scroll', { text: 'Scrolled up 3' })), { kind: 'scroll', dir: 'up', at: null });
+  assert.deepEqual(U.motionOf(ev('screenshot')), { kind: 'flash', box: null });
+  assert.deepEqual(U.motionOf(ev('zoom', { x: 100, y: 50, x2: 20, y2: 250 })), { kind: 'flash', box: { x: 20, y: 50, w: 80, h: 200 } });
+  for (const k of ['say', 'wait', 'done', 'start', 'error', 'message']) assert.equal(U.motionOf(ev(k, { x: 1, y: 1 })), null);
+  assert.equal(U.motionOf({ kind: 'click', x: 1, y: 1 }), null);   // not a real event (no seq)
+  assert.equal(U.motionOf(null), null);
+});
+
+test('motion: the cursor glide eases out and lands exactly', () => {
+  assert.equal(U.easeOut(0), 0);
+  assert.equal(U.easeOut(1), 1);
+  assert.equal(U.easeOut(2), 1);
+  assert.equal(U.easeOut(-1), 0);
+  assert.ok(U.easeOut(0.5) > 0.5);   // most of the way there by halfway
+  assert.ok(U.easeOut(0.25) < U.easeOut(0.5));
+  const from = { x: 0, y: 0 }, to = { x: 100, y: 200 };
+  assert.deepEqual(U.glideAt(from, to, 1000, 1000, 250), { x: 0, y: 0, done: false });
+  const mid = U.glideAt(from, to, 1000, 1125, 250);
+  assert.equal(mid.done, false);
+  assert.ok(Math.abs(mid.x - 87.5) < 1e-9 && Math.abs(mid.y - 175) < 1e-9);
+  assert.deepEqual(U.glideAt(from, to, 1000, 1250, 250), { x: 100, y: 200, done: true });
+  assert.deepEqual(U.glideAt(from, to, 1000, 9999, 250), { x: 100, y: 200, done: true });
+  assert.deepEqual(U.glideAt(null, to, 1000, 1000, 250), { x: 100, y: 200, done: true });   // first sight: just there
+  assert.deepEqual(U.glideAt(from, to, 1000, 1000, 0), { x: 100, y: 200, done: true });
+  assert.equal(U.glideAt(from, null, 0, 0), null);
+});
+
+test('motion: typing finishes within 1.2 s however long the text is', () => {
+  assert.deepEqual(U.tickerTiming(0), { step: 0, total: 0 });
+  assert.deepEqual(U.tickerTiming(10), { step: 45, total: 450 });   // short text: a steady pace
+  const long = U.tickerTiming(60);
+  assert.ok(long.total <= 1200 + 1e-9 && long.step === 20);
+  assert.ok(U.tickerTiming(5000).total <= 1200 + 1e-9);
+  assert.equal(U.tickerShown(10, 0), 1);
+  assert.equal(U.tickerShown(10, 44), 1);
+  assert.equal(U.tickerShown(10, 45), 2);
+  assert.equal(U.tickerShown(10, 449), 10);
+  assert.equal(U.tickerShown(10, 99999), 10);
+  assert.equal(U.tickerShown(60, 1200), 60);
+  assert.equal(U.tickerShown(0, 100), 0);
+});
+
+test('motion: a drag trail runs from where it started to where it let go', () => {
+  const g = U.trailGeom({ x: 0, y: 0 }, { x: 1280, y: 0 }, 1280, 800, 640, 400);
+  assert.deepEqual(g, { left: 0, top: 0, length: 640, angle: 0 });
+  const d = U.trailGeom({ x: 640, y: 400 }, { x: 640, y: 800 }, 1280, 800, 640, 400);
+  assert.equal(d.left, 50); assert.equal(d.top, 50); assert.equal(d.length, 200); assert.equal(d.angle, 90);
+  assert.equal(U.trailGeom({ x: 1, y: 1 }, null, 1280, 800, 640, 400), null);
+  assert.equal(U.trailGeom({ x: 1, y: 1 }, { x: 2, y: 2 }, 1280, 800, 0, 400), null);
+});
+
 test('settings words and op errors', () => {
   assert.equal(U.clampSteps(5), 10);
   assert.equal(U.clampSteps(500), 300);
