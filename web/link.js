@@ -74,6 +74,9 @@
     });
     // Chief first, then the order Squall shows
     bots.sort((x, y) => (y.id === CHIEF) - (x.id === CHIEF));
+    // the whole team is paused (the phone's Pause all): a bot that isn't working or waiting on Storm shows as paused
+    const paused = !!(view && view.paused);
+    if (paused) for (const b of bots) if (b.status !== 'working' && b.status !== 'waiting') b.status = 'paused';
 
     const chats = {};
     const groups = [];
@@ -108,6 +111,7 @@
       state.desktop = { version: String(d.current), updating: !!d.busy };
       if (d.ready) state.desktop.latest = String(d.ready);
     }
+    if (paused) state.paused = true;   // the phone's Pause all switch
     state.version = hash(JSON.stringify(state));
     return state;
   }
@@ -243,6 +247,11 @@
         return c ? { do: 'clear', chat: c } : { do: 'none' };
       }
       case 'chat.clearAll': return { do: 'clearAll' };
+      case 'team.pause': {
+        // the phone's Pause all (and Siri's "Pause my team" / "Resume my team"): { paused: true/false }
+        if (typeof a.paused !== 'boolean') return { error: 'Pause has to be on or off.' };
+        return { do: 'teamPause', paused: a.paused };
+      }
       case 'inbox.answer': {
         const ap = ((view && view.approvals) || []).find(x => String(x.requestId) === String(a.itemId));
         if (!ap) return { error: 'That question was already answered or has gone.' };
@@ -325,6 +334,7 @@
         desktop: status.update || null,
         usage: h.usage ? h.usage() : null,
         now: Date.now(),
+        paused: h.paused ? !!h.paused() : false,
       };
     }
 
@@ -357,6 +367,12 @@
         case 'read': h.markRead(chat); return { ok: true };
         case 'clear': h.clear(chat); return { ok: true };
         case 'clearAll': (S.chats || []).forEach(c => h.clear(c)); return { ok: true };
+        case 'teamPause': {
+          if (!h.setPaused) return { ok: false, error: CANT };
+          h.setPaused(r.paused, 'the phone');
+          await pushNow();
+          return { ok: true };
+        }
         case 'answer': {
           const res = await h.answer(r.requestId, r.decision);
           return res && res.ok ? { ok: true } : { ok: false, error: 'That question had already gone on the computer.' };
