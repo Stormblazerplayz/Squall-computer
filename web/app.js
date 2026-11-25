@@ -1994,13 +1994,13 @@
     if (mi) {
       const out = [];
       mi.entries.forEach((e, i) => {
-        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || '') });
+        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || ''), summary: e.role === 'assistant' ? (SUMS['e:' + e.k] || {}).text : undefined });
         else if (e.role === 'peer' && APP_NAME_RX.test(e.from || '') && !SQ_NOTE_RX.test(e.text || ''))
           out.push({ id: 'e' + i, who: 'Storm', kind: 'msg', text: stripBotOnly(String(e.text || '').replace(VIA_RX, '').replace(/\n\nHe[’']s watching this session live[\s\S]*$/, '')) });
       });
       return out;
     }
-    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time, photos: (m.images || []).length || undefined }));
+    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time, photos: (m.images || []).length || undefined, summary: m.kind === 'agent' ? (m.summary || (SUMS['m:' + m.id] || {}).text) : undefined }));
   }
   function linkTyping(c) {
     const mi = c.kind === 'dm' ? mirrorFor(c) : null;
@@ -5707,6 +5707,24 @@
       return true;
     },
     stop: c => { if (!S.timers[c.id]) return false; stopTimer(c.id); return true; },
+  };
+  // Summaries and Catch up from the phone (docs/phone-summaries.md): the same Haiku summary as the Summary button under a message.
+  // A message's summary the phone asked for shows under it on the computer too.
+  window.SquallSummaryOps = {
+    summarize: text => Bridge.call('summarize', { text }),
+    save: (c, id, s) => {
+      if (!c || !s) return;
+      const m = (c.messages || []).find(x => x.id === id);
+      if (m) {
+        if (m.kind !== 'agent' || m.summary) return;
+        m.summary = s; msgCache.delete(m); saveSoon();
+      } else {
+        const mi = c.kind === 'dm' ? mirrorFor(c) : null, e = mi && /^e\d+$/.test(String(id)) ? mi.entries[+String(id).slice(1)] : null;
+        if (!e || e.role !== 'assistant') return;
+        SUMS['e:' + e.k] = { text: s }; entryHTML.delete(e);
+      }
+      if (activeChat() === c) renderChat();
+    },
   };
 
   function startTimer(chat, forced) {

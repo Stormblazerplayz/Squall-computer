@@ -552,6 +552,161 @@
 
   root.SquallTimers = { withTimers, timerRoute, timerDo, phoneChatId, TIMER_MIN, TIMER_MAX };
 
+  // ---------------------------------------------------------------- summaries and catch up (docs/phone-summaries.md)
+
+  // summary.message { chatId, messageId }: a short version of one long teammate message, the same as the Summary button under it on
+  // the computer. summary.catchUp { chatId }: a short version of the chat's latest messages. Both run on the computer (Haiku) and can
+  // take longer than an action may, so the action only starts the job and the answer comes in the next state: the message's
+  // `summary`, and state.summaries { jobs, catchUps }.
+
+  const SUM_MIN = 500, SUM_JOBS = 2, SUM_TIMEOUT = 60000, SUM_KEEP = 200, SUM_FAILED_FOR = 2 * 60000, SUM_ASK_MAX = 12000;
+  const CATCH_MAX = 30, CATCH_LINE = 1200, CATCH_KEEP = 12 * 3600000;
+
+  // the ids phoneMessages gives the latest messages of a chat, in the same order as list.slice(-MAX_MESSAGES)
+  function phoneIdsOf(list) {
+    const seen = {};
+    return (list || []).slice(-MAX_MESSAGES).map(m => {
+      if (m && m.id) return String(m.id);
+      const base = 'h' + hash((m && m.who) + '|' + String((m && m.text) || ''));
+      seen[base] = (seen[base] || 0) + 1;
+      return base + '-' + seen[base];
+    });
+  }
+
+  // the message with this phone id in a chat's messages
+  function messageById(list, id) {
+    const recent = (list || []).slice(-MAX_MESSAGES);
+    const i = phoneIdsOf(list).indexOf(id);
+    return i >= 0 ? recent[i] : null;
+  }
+
+  // the chat's latest messages as lines for a catch up: { text, count, upTo (the phone id of the newest) } or null when there's nothing
+  function catchUpText(list) {
+    const recent = (list || []).slice(-MAX_MESSAGES);
+    const ids = phoneIdsOf(list);
+    const lines = [];
+    let total = 0, upTo = null;
+    for (let i = recent.length - 1; i >= 0 && lines.length < CATCH_MAX; i--) {
+      const m = recent[i];
+      if (!m || m.kind !== 'msg' || !String(m.text || '').trim()) continue;
+      let t = String(m.text).replace(/\s+/g, ' ').trim();
+      if (t.length > CATCH_LINE) t = t.slice(0, CATCH_LINE) + '…';
+      const line = (m.who || 'Someone') + ': ' + t;
+      if (total + line.length > SUM_ASK_MAX && lines.length) break;
+      if (!lines.length) upTo = ids[i];
+      lines.unshift(line);
+      total += line.length + 1;
+    }
+    if (!lines.length) return null;
+    return { text: lines.join('\n'), count: lines.length, upTo };
+  }
+
+  // null when it isn't a summary action; { error } or { do: 'message' | 'catchUp', key, chatId, chat, ... }
+  function summaryRoute(view, a) {
+    if (!a || (a.type !== 'summary.message' && a.type !== 'summary.catchUp')) return null;
+    const chatId = typeof a.chatId === 'string' ? a.chatId : '';
+    const chat = chatId && chatFor(view, chatId);
+    if (!chat) return { error: 'That chat isn’t on the computer any more.' };
+    if (a.type === 'summary.catchUp') {
+      const c = catchUpText(chat.messages);
+      if (!c) return { error: 'There’s nothing to catch up on in this chat yet.' };
+      return { do: 'catchUp', key: 'c\n' + chatId, chatId, chat, text: c.text, count: c.count, upTo: c.upTo };
+    }
+    const messageId = typeof a.messageId === 'string' ? a.messageId : '';
+    const m = messageId && messageById(chat.messages, messageId);
+    if (!m) return { error: 'That message isn’t in the chat any more.' };
+    if (m.who === 'Storm' || m.kind !== 'msg') return { error: 'Only a teammate’s message can be summarized.' };
+    const text = String(m.text || '');
+    if (text.length < SUM_MIN) return { error: 'That message is already short.' };
+    return { do: 'message', key: 'm\n' + chatId + '\n' + messageId, chatId, chat, messageId, text: text.slice(0, SUM_ASK_MAX) };
+  }
+
+  // holds the summaries the phone asked for and the jobs still running. ops(): window.SquallSummaryOps { summarize(text), save? }
+  function summaryDesk(ops, changed, now) {
+    const done = new Map();      // message key -> summary text
+    const catchUps = new Map();  // chatId -> { text, at, upTo, count }
+    const jobs = new Map();      // key -> { chatId, messageId, state: 'working' | 'failed', error, at }
+    function keep(key, text) {
+      done.delete(key);
+      done.set(key, text);
+      while (done.size > SUM_KEEP) done.delete(done.keys().next().value);
+    }
+    function running() { let n = 0; for (const j of jobs.values()) if (j.state === 'working') n++; return n; }
+    function tidy() {
+      const t = now();
+      for (const [k, j] of jobs) if (j.state === 'failed' && t - j.at > SUM_FAILED_FOR) jobs.delete(k);
+      for (const [k, c] of catchUps) if (t - c.at > CATCH_KEEP) catchUps.delete(k);
+    }
+    function run(r) {
+      if (r.error) return { ok: false, error: r.error };
+      const o = ops();
+      if (!o || !o.summarize) return { ok: false, error: CANT };
+      tidy();
+      if (r.do === 'message' && done.has(r.key)) return { ok: true };
+      const j = jobs.get(r.key);
+      if (j && j.state === 'working') return { ok: true };
+      if (running() >= SUM_JOBS) return { ok: false, error: 'Squall is already writing a summary. Try again in a moment.' };
+      jobs.set(r.key, { chatId: r.chatId, messageId: r.messageId || null, state: 'working', error: null, at: now() });
+      let timer = null;
+      const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error('It took too long.')), SUM_TIMEOUT); if (timer && timer.unref) timer.unref(); });
+      let asked;
+      try { asked = Promise.resolve(o.summarize(r.text)); } catch (e) { asked = Promise.reject(e); }
+      Promise.race([asked, late])
+        .then(out => {
+          const s = String(out || '').trim();
+          if (!s) throw new Error('The summary came back empty.');
+          if (r.do === 'catchUp') catchUps.set(r.chatId, { text: s.slice(0, 1200), at: now(), upTo: r.upTo, count: r.count });
+          else {
+            keep(r.key, s.slice(0, 1200));
+            try { if (o.save) o.save(r.chat.raw, r.messageId, s); } catch (e) { }
+          }
+          jobs.delete(r.key);
+        })
+        .catch(e => { jobs.set(r.key, { chatId: r.chatId, messageId: r.messageId || null, state: 'failed', error: String((e && e.message) || e || 'It didn’t work.').slice(0, 200), at: now() }); })
+        .finally(() => { clearTimeout(timer); changed(); });
+      return { ok: true };
+    }
+    return {
+      route: summaryRoute,
+      run,
+      view() {
+        tidy();
+        const out = { done: new Map(done), catchUps: new Map(catchUps), jobs: [] };
+        for (const j of jobs.values()) {
+          const row = { chatId: j.chatId, messageId: j.messageId, state: j.state };
+          if (j.error) row.error = j.error;
+          out.jobs.push(row);
+        }
+        return out;
+      },
+    };
+  }
+
+  // adds `summary` to the phone's messages and state.summaries { jobs, catchUps }. desk: what summaryDesk's view() gives
+  function withSummaries(state, desk) {
+    if (!desk) return state;
+    const chats = state.chats || {};
+    for (const chatId of Object.keys(chats)) {
+      for (const m of chats[chatId] || []) {
+        if (m.kind !== 'bot' || m.summary) continue;
+        const s = desk.done.get('m\n' + chatId + '\n' + m.id);
+        if (s) m.summary = s;
+      }
+    }
+    const catchUps = [];
+    for (const [chatId, c] of desk.catchUps) {
+      if (!chats[chatId]) continue;
+      catchUps.push({ chatId, text: c.text, at: new Date(c.at).toISOString(), upTo: c.upTo || null, count: c.count });
+    }
+    catchUps.sort((a, b) => a.chatId.localeCompare(b.chatId));
+    const jobs = desk.jobs.filter(j => chats[j.chatId]).sort((a, b) => (a.chatId + (a.messageId || '')).localeCompare(b.chatId + (b.messageId || '')));
+    state.summaries = { jobs, catchUps };
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  root.SquallSummaries = { summaryRoute, summaryDesk, withSummaries, messageById, catchUpText, phoneIdsOf, SUM_MIN, CATCH_MAX };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -710,6 +865,7 @@
       if (photos) out.photos = photos;
       if (kind === 'bot') { const a = idOf(m.who); if (a) out.author = a; }
       if (m.at) out.at = m.at;
+      if (kind === 'bot' && m.summary) out.summary = String(m.summary).slice(0, 1200);
       return out;
     }).filter(m => m.text.trim() || m.kind !== 'bot');
   }
@@ -826,7 +982,12 @@
     const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
     const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
     const notes = notesDesk(() => root.SquallNotesOps, () => Date.now());
-    const phoneState = () => { const v = teamView(); return withTimers(withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps); };
+    const summaries = summaryDesk(() => root.SquallSummaryOps, () => { pushNow(); }, () => Date.now());
+    const phoneState = () => {
+      const v = teamView();
+      const state = withTimers(withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps);
+      return root.SquallSummaryOps ? withSummaries(state, summaries.view()) : state;
+    };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -930,11 +1091,13 @@
           const photo = team || note ? null : photoRoute(view(), m.body || {});
           const model = team || note || photo ? null : modelRoute(m.body || {}, root.SquallModelOps);
           const timer = team || note || photo || model ? null : timerRoute(view(), m.body || {});
+          const sum = team || note || photo || model || timer ? null : summaryRoute(view(), m.body || {});
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
           else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
           else if (model) { result = modelDo(model, root.SquallModelOps); await pushNow(); }
           else if (timer) { result = timerDo(timer, root.SquallTimerOps); await pushNow(); }
+          else if (sum) { result = summaries.run(sum); await pushNow(); }
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }
