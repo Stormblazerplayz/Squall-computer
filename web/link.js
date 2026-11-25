@@ -755,6 +755,56 @@
 
   root.SquallClip = { clipRoute, clipDesk, withClipboard, CLIP_MAX, CLIP_KEEP };
 
+  // ---------------------------------------------------------------- add a teammate (docs/phone-add-teammate.md)
+
+  // bot.add { name, role, color, prompt } brings a new teammate to life, the same as Add teammate on the computer. The phone gets
+  // state.team.add = true and the computer's starting points (state.team.presets) when this Squall can do it.
+  const ROLE_MAX = 60, BRIEF_MAX = 2000, COLOR_RX = /^#[0-9a-fA-F]{6}$/;
+
+  // null when it isn't bot.add; { error } or { do: 'add', name, role, color, prompt }
+  function addRoute(view, a) {
+    if (!a || a.type !== 'bot.add') return null;
+    const agents = ((view && view.agents) || []).filter(x => x && x.name);
+    const name = String(a.name || '').trim();
+    if (!NAME_RX.test(name)) return { error: NAME_HELP };
+    if (agents.some(x => x.name.toLowerCase() === name.toLowerCase())) return { error: name + ' is already on the team.' };
+    if (agents.length >= TEAM_MAX) return { error: 'The team is full (' + TEAM_MAX + ' teammates).' };
+    const role = String(a.role == null ? '' : a.role).trim();
+    if (role.length > ROLE_MAX) return { error: 'Keep the role to ' + ROLE_MAX + ' characters.' };
+    const color = String(a.color || '');
+    if (!COLOR_RX.test(color)) return { error: 'Pick a color.' };
+    const prompt = String(a.prompt == null ? '' : a.prompt).trim();
+    if (prompt.length > BRIEF_MAX) return { error: 'Keep what they do to ' + BRIEF_MAX.toLocaleString('en-US') + ' characters.' };
+    return { do: 'add', name, role, color: color.toUpperCase(), prompt };
+  }
+
+  // ops: window.SquallAddOps { add(name, role, color, prompt) -> the name }; after(): the view once the team is updated
+  async function addDo(r, ops, after) {
+    if (r.error) return { ok: false, error: r.error };
+    if (!ops || !ops.add) return { ok: false, error: CANT };
+    const name = await ops.add(r.name, r.role, r.color, r.prompt);
+    const v = await after();
+    const id = botIds(((v && v.agents) || []).filter(a => a && a.name), leadOf(v))[name];
+    return id ? { ok: true, id } : { ok: true };
+  }
+
+  // state.team.add and state.team.presets [{ id, label, role, brief, color }] (needs withTeam first)
+  function withAdd(state, ops) {
+    if (!ops || !ops.add || !state.team) return state;
+    state.team.add = true;
+    const presets = [];
+    for (const p of (ops.presets && ops.presets()) || []) {
+      if (!p || typeof p.id !== 'string' || !COLOR_RX.test(p.color || '')) continue;
+      presets.push({ id: p.id, label: String(p.label || p.role || p.id).slice(0, 30), role: String(p.role || '').slice(0, ROLE_MAX), brief: String(p.brief || '').slice(0, BRIEF_MAX), color: p.color.toUpperCase() });
+      if (presets.length >= 12) break;
+    }
+    state.team.presets = presets;
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  root.SquallAdd = { addRoute, addDo, withAdd, ROLE_MAX, BRIEF_MAX };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -1034,7 +1084,7 @@
     const summaries = summaryDesk(() => root.SquallSummaryOps, () => { pushNow(); }, () => Date.now());
     const phoneState = () => {
       const v = teamView();
-      const state = withTimers(withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps);
+      const state = withTimers(withModels(withNotes(withAdd(withTeam(withLater(buildState(v), v), v), root.SquallAddOps), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps);
       const withSum = root.SquallSummaryOps ? withSummaries(state, summaries.view()) : state;
       return root.SquallClipOps ? withClipboard(withSum, clip.view()) : withSum;
     };
@@ -1143,6 +1193,7 @@
           const timer = team || note || photo || model ? null : timerRoute(view(), m.body || {});
           const sum = team || note || photo || model || timer ? null : summaryRoute(view(), m.body || {});
           const clipAsk = team || note || photo || model || timer || sum ? null : clipRoute(m.body || {});
+          const adding = team || note || photo || model || timer || sum || clipAsk ? null : addRoute(view(), m.body || {});
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
           else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
@@ -1150,6 +1201,7 @@
           else if (timer) { result = timerDo(timer, root.SquallTimerOps); await pushNow(); }
           else if (sum) { result = summaries.run(sum); await pushNow(); }
           else if (clipAsk) { result = await clip.run(clipAsk); await pushNow(); }
+          else if (adding) result = await addDo(adding, root.SquallAddOps, async () => { await pushNow(); return view(); });
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }

@@ -4753,6 +4753,22 @@
     return a.folder;
   }
   window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief, projects: phoneProjects, setFolder: phoneSetFolder };
+  // Add teammate from the phone (squall-computer docs/phone-add-teammate.md): the same as Bring to life in Add teammate here
+  async function phoneAddBot(name, role, color, prompt) {
+    name = String(name || '').trim();
+    const bad = botNameProblem(name);
+    if (bad) throw new Error(bad);
+    await Bridge.call('teamAdd', { name, role: String(role || ''), color, prompt: String(prompt || '') });
+    noteTeamChange(name + ' joined the team (added on the phone).', true);
+    S.born = { name, until: Date.now() + 2600 }; sfx('born');
+    await saveNow();
+    await refreshTeamModel();
+    greetNewBot(name, String(role || ''), 'Storm', String(prompt || '')).catch(() => { });
+    await saveNow();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return name;
+  }
+  window.SquallAddOps = { add: phoneAddBot, presets: () => BOT_PRESETS.map(p => ({ id: p.id, label: p.label, role: p.role, brief: p.brief, color: p.color })) };
   // the Obsidian vault on the phone (squall-computer docs/phone-notes.md): the same search, read and add-a-line as the vault window here.
   // Nothing is removed or overwritten
   window.SquallNotesOps = {
