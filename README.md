@@ -11,6 +11,7 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 | `src/SquallLink/` | The phone link (pairing, the phone API, voice) and the GitHub auto-updater, in C#. `src/SquallSwap/` is the small program that swaps in an update. |
 | `web/link.js` | The window's half of the phone link, and the Pair a phone screen. |
 | `web/uno.js` | The window's half of Squall Uno (each agent's own computer, live): the sidebar section, the Uno tab in the right pane (every computer at a glance) and the live view. See [`docs/squall-uno.md`](docs/squall-uno.md). |
+| `web/gif.js` | A small animated GIF encoder (no dependencies) that Squall Uno's **Save replay** uses to save a task's step pictures as a GIF, made in the window. |
 | `tests/` | Tests: `dotnet test SquallLink.sln` and `node --test tests/web/*.test.mjs`. |
 | `team.json` | The team: each agent's role, prompt, allowed tools and memory, who leads, and the team rules. |
 

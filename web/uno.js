@@ -319,6 +319,7 @@
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
     back: '<path d="M15 6l-6 6 6 6"/>',
+    download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
   };
   const svg = (name, size) => name === 'bolt' ? ICONS.bolt : '<svg viewBox="0 0 24 24" width="' + (size || 14) + '" height="' + (size || 14) + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || ICONS.dot) + '</svg>';
   const CURSOR_SVG = '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 2.5 4 19l4.4-4.2 2.9 6.7 2.6-1.1-2.9-6.6H17z" fill="#fff" stroke="#0b0a12" stroke-width="1.4" stroke-linejoin="round"/></svg>';
@@ -348,13 +349,110 @@
     return (num(shot.step) && +shot.step > 0 ? 'Step ' + (+shot.step) : 'Start') + (text ? ' · ' + text : '');
   }
 
+  // ---------------- saving a replay as an animated GIF (web/gif.js makes it, in the page) ----------------
+
+  const GIF_MAX_W = 800, GIF_CAPTION_H = 30, GIF_STEP_MS = 900, GIF_LAST_MS = 2500;
+  /** The GIF's size for a width × height screen: at most 800 px wide, the picture keeping its shape, a caption strip under it. */
+  function gifFrameSize(width, height) {
+    const w0 = +width > 0 ? +width : 1280, h0 = +height > 0 ? +height : 800;
+    const w = Math.max(2, Math.min(GIF_MAX_W, Math.round(w0)));
+    const picH = Math.max(2, Math.round(h0 * w / w0));
+    return { w, picH, h: picH + GIF_CAPTION_H, caption: GIF_CAPTION_H };
+  }
+  /** "squall-uno-nova-2026-11-25-0905.gif": whose computer, and when the task started (local time; now if not known). */
+  function gifFileName(agentName, at) {
+    const who = String(agentName || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'agent';
+    const d = new Date(num(at) && +at > 0 ? +at : Date.now());
+    const p = n => String(n).padStart(2, '0');
+    return 'squall-uno-' + who + '-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.gif';
+  }
+
+  // Shortens text with … until it fits in maxW pixels (g: a canvas 2D context).
+  function fitText(g, text, maxW) {
+    if (g.measureText(text).width <= maxW) return text;
+    let lo = 0, hi = text.length;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (g.measureText(text.slice(0, mid).trimEnd() + '…').width <= maxW) lo = mid; else hi = mid - 1; }
+    return text.slice(0, lo).trimEnd() + '…';
+  }
+
+  // One GIF frame on g: the step's picture (fitted, letterboxed if its size differs), the ring where the pointer was
+  // (as in the replay), and the caption strip: shotLabel(shot) on the left, "4 of 12" on the right.
+  function drawGifFrame(g, size, img, shot, at, total) {
+    g.fillStyle = '#0b0a12';
+    g.fillRect(0, 0, size.w, size.h);
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const fit = fitBox(size.w, size.picH, iw, ih);
+    const ox = Math.floor((size.w - fit.w) / 2), oy = Math.floor((size.picH - fit.h) / 2);
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, ox, oy, fit.w, fit.h);
+    const p = num(shot.cursorX) && num(shot.cursorY) ? framePct(+shot.cursorX, +shot.cursorY, +shot.width || iw, +shot.height || ih) : null;
+    if (p) {
+      g.beginPath();
+      g.arc(ox + p.left / 100 * fit.w, oy + p.top / 100 * fit.h, 8, 0, Math.PI * 2);
+      g.lineWidth = 2.5;
+      g.strokeStyle = '#5fb2ff';
+      g.stroke();
+    }
+    g.fillStyle = '#16141f';
+    g.fillRect(0, size.picH, size.w, size.caption);
+    g.textBaseline = 'middle';
+    const y = size.picH + size.caption / 2 + 0.5;
+    g.font = '500 12px "Segoe UI", system-ui, sans-serif';
+    const count = at + ' of ' + total;
+    const countW = g.measureText(count).width;
+    g.fillStyle = '#a9adc0';
+    g.textAlign = 'right';
+    g.fillText(count, size.w - 12, y);
+    g.font = '600 13px "Segoe UI", system-ui, sans-serif';
+    g.fillStyle = '#eceaf6';
+    g.textAlign = 'left';
+    g.fillText(fitText(g, shotLabel(shot), size.w - 36 - countW), 12, y);
+  }
+
+  /**
+   * A task's replay as an animated GIF: one frame per shot whose picture is still kept, 0.9 s each and the last 2.5 s,
+   * looping. io: { Gif (web/gif.js), canvas, picOf(shot) -> base64 JPEG or null, loadPic(base64) -> a loaded image or
+   * null, progress(done, total), pause() (lets the window draw) }. Answers { bytes (null when no picture was kept),
+   * frames, missing, width, height }.
+   */
+  async function makeReplayGif(shots, io) {
+    const list = Array.isArray(shots) ? shots : [];
+    const g = io.canvas.getContext('2d', { willReadFrequently: true });
+    let gif = null, size = null, pending = null, frames = 0, missing = 0;
+    for (let i = 0; i < list.length; i++) {
+      const shot = list[i];
+      const pic = await io.picOf(shot);
+      const img = pic ? await io.loadPic(pic) : null;
+      if (!img) missing++;
+      else {
+        if (!size) {
+          size = gifFrameSize(img.naturalWidth, img.naturalHeight);
+          io.canvas.width = size.w;
+          io.canvas.height = size.h;
+          gif = io.Gif.createGif(size.w, size.h, { loop: 0 });
+        }
+        drawGifFrame(g, size, img, shot, i + 1, list.length);
+        // each frame waits for the next one, so the last can be held longer
+        if (pending) gif.addFrame(pending, GIF_STEP_MS);
+        pending = g.getImageData(0, 0, size.w, size.h).data;
+        frames++;
+      }
+      if (io.progress) io.progress(i + 1, list.length);
+      if (io.pause) await io.pause();
+    }
+    if (!pending) return { bytes: null, frames: 0, missing, width: 0, height: 0 };
+    gif.addFrame(pending, GIF_LAST_MS);
+    return { bytes: gif.finish(), frames, missing, width: size.w, height: size.h };
+  }
+
   function wire(h) {
     if (!h || !h.Bridge || typeof document === 'undefined') return null;
     const Bridge = h.Bridge, S = h.S || {};
     const esc = h.esc || (s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
     const available = !!Bridge.host;
     const store = newStore();
-    const film = { lists: {}, loaded: {}, loading: {}, pics: new Map(), asked: new Set(), replay: null, playing: 0, sessionId: null };
+    const film = { lists: {}, loaded: {}, loading: {}, pics: new Map(), asked: new Set(), replay: null, playing: 0, sessionId: null, saving: null, savedAt: 0 };
     const ui = {
       open: false, agentId: null, agentName: '', watching: null, viewSession: null, wheelLocal: false, clickMode: 'left_click',
       settings: false, err: '', note: '', checkText: '', busy: {}, lastPush: 0, loaded: false, missing: '', refreshing: false,
@@ -942,7 +1040,8 @@
         row = document.createElement('div');
         row.className = 'uno-film';
         row.innerHTML = '<div class="uno-film-h"><span class="uno-lbl">Replay</span><span class="uno-film-n"></span>' +
-          '<button class="uno-key uno-film-play" data-u="shotPlay" title="Play the steps">' + svg('play', 12) + '<span>Play</span></button></div>' +
+          '<button class="uno-key uno-film-play" data-u="shotPlay" title="Play the steps">' + svg('play', 12) + '<span>Play</span></button>' +
+          '<button class="uno-key uno-film-save" data-u="saveGif" title="Save this task’s replay as an animated GIF">' + svg('download', 12) + '<span>Save replay</span></button></div>' +
           '<div class="uno-film-strip" role="list"></div>';
         now.insertAdjacentElement('afterend', row);
         if (typeof IntersectionObserver !== 'undefined') {
@@ -956,7 +1055,9 @@
         ov.hidden = true;
         ov.innerHTML = '<img class="uno-replay-img" alt="" draggable="false"><i class="uno-replay-dot" hidden></i>' +
           '<div class="uno-replay-bar"><button class="uno-replay-nav" data-u="shotPrev" title="Step back (←)">‹</button><span class="uno-replay-t"></span>' +
-          '<button class="uno-replay-nav" data-u="shotNext" title="Step forward (→)">›</button><button class="uno-btn primary uno-replay-live" data-u="shotLive">Back to live</button></div>';
+          '<button class="uno-replay-nav" data-u="shotNext" title="Step forward (→)">›</button>' +
+          '<button class="uno-btn uno-replay-save" data-u="saveGif" title="Save this task’s replay as an animated GIF">' + svg('download', 13) + '<span>Save replay</span></button>' +
+          '<button class="uno-btn primary uno-replay-live" data-u="shotLive">Back to live</button></div>';
         box.appendChild(ov);
       }
       return row;
@@ -979,6 +1080,7 @@
       if (n && n.textContent !== label) n.textContent = label;
       const pb = row.querySelector('.uno-film-play');
       if (pb) { pb.classList.toggle('on', !!film.playing); const sp = pb.querySelector('span'); if (sp) sp.textContent = film.playing ? 'Pause' : 'Play'; }
+      paintSave();
       const strip = row.querySelector('.uno-film-strip');
       const have = new Set(Array.from(strip.children).map(el => el.getAttribute('data-uv')));
       const atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 30;
@@ -1077,6 +1179,79 @@
       if (pb) { pb.classList.remove('on'); const sp = pb.querySelector('span'); if (sp) sp.textContent = 'Play'; }
     }
 
+    // ---------------- Save replay: the task's pictures as one animated GIF, made here in the page ----------------
+
+    function paintSave() {
+      if (!view) return;
+      const saved = !film.saving && Date.now() - film.savedAt < 3000;
+      const text = film.saving ? 'Making GIF… ' + film.saving.done + '/' + film.saving.total : saved ? 'Saved' : 'Save replay';
+      view.querySelectorAll('[data-u="saveGif"]').forEach(b => {
+        b.disabled = !!film.saving;
+        b.classList.toggle('busy', !!film.saving);
+        const sp = b.querySelector('span');
+        if (sp && sp.textContent !== text) sp.textContent = text;
+      });
+    }
+
+    // A shot's JPEG (base64): the one the filmstrip already has, else asked for. Null once it isn't kept anymore.
+    async function shotJpeg(shot) {
+      const key = +shot.id;
+      if (film.pics.has(key)) return film.pics.get(key);
+      const res = await op('shot', { sessionId: shot.sessionId, id: key });
+      return res.ok && res.shot && res.shot.jpeg ? res.shot.jpeg : null;
+    }
+
+    function loadPic(b64) {
+      return new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => resolve(img.naturalWidth > 0 ? img : null);
+        img.onerror = () => resolve(null);
+        img.src = 'data:image/jpeg;base64,' + b64;
+      });
+    }
+
+    function downloadBlob(blob, name) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    async function saveGif() {
+      if (film.saving) return;
+      const sess = shownSession();
+      const list = sess ? (film.lists[sess.id] || []).slice() : [];
+      if (!list.length) { flash('This task has no pictures to save yet.'); return; }
+      const Gif = root.SquallGif;
+      const canvas = document.createElement('canvas');
+      if (!Gif || !canvas.getContext || !canvas.getContext('2d', { willReadFrequently: true })) { flash('This copy of Squall can’t make GIFs. Update Squall on this PC.'); return; }
+      const who = agentInfo().agentName || sess.agentName || sess.agentId;
+      film.saving = { done: 0, total: list.length };
+      paintSave();
+      try {
+        const made = await makeReplayGif(list, {
+          Gif, canvas, picOf: shotJpeg, loadPic,
+          progress: done => { film.saving.done = done; paintSave(); },
+          pause: () => new Promise(r => setTimeout(r, 0)),   // let the window draw between frames
+        });
+        if (!made.bytes) { flash('This task’s pictures aren’t kept anymore, so there’s nothing to save.'); return; }
+        downloadBlob(new Blob([made.bytes], { type: 'image/gif' }), gifFileName(who, sess.startedAt));
+        film.savedAt = Date.now();
+        setTimeout(paintSave, 3100);
+        if (made.missing) flash('Saved the GIF. ' + made.missing + (made.missing === 1 ? ' picture isn’t' : ' pictures aren’t') + ' kept anymore, so ' + (made.missing === 1 ? 'it’s' : 'they’re') + ' not in it.');
+      } catch (e) {
+        flash('Couldn’t make the GIF: ' + (String(errorText(e) || '').replace(/[.\s]+$/, '') || 'something went wrong') + '.');
+      } finally {
+        film.saving = null;
+        paintSave();
+      }
+    }
+
     // ---------------- doing things ----------------
 
     async function run(name, fields, after) {
@@ -1144,6 +1319,7 @@
         case 'shotPrev': stepShot(-1); break;
         case 'shotNext': stepShot(1); break;
         case 'shotPlay': if (film.playing) stopPlay(); else play(); break;
+        case 'saveGif': saveGif(); break;
         case 'session': {
           ui.viewSession = cur && cur.id === v ? null : v;
           render();
@@ -1247,7 +1423,7 @@
   const api = {
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
     computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, nowLine, ago,
-    addShots, shotNeighbor, shotLabel,
+    addShots, shotNeighbor, shotLabel, gifFrameSize, gifFileName, makeReplayGif,
     feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

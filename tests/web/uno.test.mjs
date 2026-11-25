@@ -2,10 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readGif } from './gif-read.mjs';
 
 const require = createRequire(import.meta.url);
 const U = require('../../web/uno.js');
 const L = require('../../web/link.js');
+const G = require('../../web/gif.js');
 
 const T = 1764000000000;
 
@@ -299,4 +301,86 @@ test('replay shots merge by id, oldest first, and step to their neighbors', () =
   assert.equal(U.shotLabel(s(3, 7, '  Clicked   at (412, 230) ')), 'Step 7 · Clicked at (412, 230)');
   assert.equal(U.shotLabel(s(3, 0, '')), 'Start');
   assert.equal(U.shotLabel(null), '');
+});
+
+test('Save replay: the GIF’s size and file name', () => {
+  assert.deepEqual(U.gifFrameSize(1280, 800), { w: 800, picH: 500, h: 530, caption: 30 });
+  assert.deepEqual(U.gifFrameSize(640, 400), { w: 640, picH: 400, h: 430, caption: 30 });   // never scaled up
+  assert.deepEqual(U.gifFrameSize(0, 0), { w: 800, picH: 500, h: 530, caption: 30 });       // unknown: the computer's 1280 × 800
+  const at = new Date(2026, 10, 25, 9, 5).getTime();   // local time, as the file name uses
+  assert.equal(U.gifFileName('Nova', at), 'squall-uno-nova-2026-11-25-0905.gif');
+  assert.equal(U.gifFileName('Quill 2.0 / Beta', at), 'squall-uno-quill-2-0-beta-2026-11-25-0905.gif');
+  assert.equal(U.gifFileName('', at), 'squall-uno-agent-2026-11-25-0905.gif');
+  assert.match(U.gifFileName('Nova'), /^squall-uno-nova-\d{4}-\d{2}-\d{2}-\d{4}\.gif$/);
+});
+
+// A stand-in canvas for Node: it remembers what was drawn and answers getImageData with the drawn picture's color.
+function fakeCanvas() {
+  const log = { texts: [], images: [], rings: 0 };
+  let color = [0, 0, 0];
+  const g = {
+    fillRect() { }, beginPath() { }, arc() { log.rings++; }, stroke() { },
+    measureText: t => ({ width: String(t).length * 7 }),
+    fillText: t => log.texts.push(String(t)),
+    drawImage: (img, x, y, w, h) => { color = img.color; log.images.push([img.id, x, y, w, h]); },
+    getImageData: (x, y, w, h) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (let i = 0; i < data.length; i += 4) { data[i] = color[0]; data[i + 1] = color[1]; data[i + 2] = color[2]; data[i + 3] = 255; }
+      // the caption strip differs per frame too
+      const row = (h - 15) * w * 4;
+      for (let i = row; i < row + log.texts.length * 4 * 3; i += 4) data[i] = 255;
+      return { data };
+    },
+  };
+  return { canvas: { width: 0, height: 0, getContext: () => g }, log };
+}
+
+test('Save replay: one frame per kept picture, 0.9 s each, the last held 2.5 s, captions from the shots', async () => {
+  const shots = [
+    { id: 1, sessionId: 'uno-a', step: 0, text: 'Took a screenshot', width: 1280, height: 800 },
+    { id: 2, sessionId: 'uno-a', step: 1, text: 'Clicked at (412, 230)', cursorX: 412, cursorY: 230, width: 1280, height: 800 },
+    { id: 3, sessionId: 'uno-a', step: 2, text: 'Typed "weather"', width: 1280, height: 800 },
+    { id: 4, sessionId: 'uno-a', step: 3, text: 'Pressed Return', width: 1280, height: 800 },
+  ];
+  const pics = { 1: 'AAA', 2: 'BBB', 4: 'DDD' };   // 3 isn't kept anymore
+  const colors = { AAA: [200, 40, 40], BBB: [40, 200, 40], DDD: [40, 40, 200] };
+  const { canvas, log } = fakeCanvas();
+  const progress = [];
+  const made = await U.makeReplayGif(shots, {
+    Gif: G, canvas,
+    picOf: async s => pics[s.id] || null,
+    loadPic: async b64 => ({ id: b64, color: colors[b64], naturalWidth: 1280, naturalHeight: 800 }),
+    progress: (done, total) => progress.push(done + '/' + total),
+  });
+  assert.equal(made.frames, 3);
+  assert.equal(made.missing, 1);
+  assert.deepEqual([made.width, made.height, canvas.width, canvas.height], [800, 530, 800, 530]);
+  assert.deepEqual(progress, ['1/4', '2/4', '3/4', '4/4']);
+  assert.deepEqual(log.images.map(x => x[0]), ['AAA', 'BBB', 'DDD']);
+  assert.deepEqual(log.images[0].slice(1), [0, 0, 800, 500]);   // the picture fills the top, the caption sits under it
+  assert.equal(log.rings, 1);                                   // the pointer ring only where the shot has a cursor
+  assert.ok(log.texts.includes('Start · Took a screenshot'));
+  assert.ok(log.texts.includes('Step 1 · Clicked at (412, 230)'));
+  assert.ok(log.texts.includes('Step 3 · Pressed Return'));
+  assert.ok(log.texts.includes('4 of 4'));
+
+  const gif = readGif(made.bytes);
+  assert.equal(gif.head, 'GIF89a');
+  assert.deepEqual([gif.width, gif.height], [800, 530]);
+  assert.ok(gif.exts.some(e => e.label === 0xff && String.fromCharCode(...e.parts[0]) === 'NETSCAPE2.0'));
+  assert.deepEqual(gif.images.map(i => i.control.delay), [90, 90, 250]);
+  assert.ok(gif.trailer);
+  // the first frame is the whole picture in its own color
+  const first = gif.images[0];
+  assert.deepEqual([first.w, first.h], [800, 530]);
+  const c = first.indices[0];
+  assert.deepEqual([first.table[c * 3], first.table[c * 3 + 1], first.table[c * 3 + 2]], [200, 40, 40]);
+});
+
+test('Save replay: nothing kept means no GIF', async () => {
+  const { canvas } = fakeCanvas();
+  const made = await U.makeReplayGif([{ id: 1, sessionId: 'uno-a', step: 1 }], { Gif: G, canvas, picOf: async () => null, loadPic: async () => null });
+  assert.deepEqual(made, { bytes: null, frames: 0, missing: 1, width: 0, height: 0 });
+  const none = await U.makeReplayGif([], { Gif: G, canvas, picOf: async () => null, loadPic: async () => null });
+  assert.equal(none.bytes, null);
 });

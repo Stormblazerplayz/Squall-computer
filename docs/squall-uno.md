@@ -128,6 +128,14 @@ oldest pictures of the session used longest ago first.
   changes, so the phone may cache it.
 - Window: the `shot` op, and a push for every new one (below).
 
+**Save replay** (in the filmstrip's header and in the replay bar) saves the shown task's pictures as one animated
+GIF, made entirely in the window by `web/gif.js` (no host op, nothing uploaded): each kept picture becomes a frame,
+scaled to at most 800 px wide, with the pointer ring and a caption strip (`Step 7 · Clicked at (412, 230)`, and
+`7 of 12`). Frames show for 0.9 s, the last for 2.5 s, and the GIF loops. Each frame has its own palette of its 255
+most used colors, and after the first only the part that changed is written, which keeps it small. The button shows
+`Making GIF… 4/12` while it works, then the file downloads as `squall-uno-<agent>-<yyyy-mm-dd-hhmm>.gif` (when the
+task started, local time). Pictures that aren't kept anymore are left out, and the window says how many.
+
 ### Pushes to the window
 
 These use the existing `Page.Tell(name, payload)`, which posts `{"event": name, ...payload}` to the page (the same
