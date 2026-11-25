@@ -8,8 +8,8 @@ typing it into that chat at that time.
 | Action | Fields | What happens |
 | --- | --- | --- |
 | `chat.sendLater` | `chatId`, `text`, `at` (ISO time) | Kept until `at`. The time must be 1 minute to 7 days ahead, and at most 30 can wait at once. |
-| `chat.cancelLater` | `id` | Taken off the list. |
-| `chat.sendLaterNow` | `id` | Sent right away and taken off the list. |
+| `chat.cancelLater` | `itemId` | Taken off the list. |
+| `chat.sendLaterNow` | `itemId` | Sent right away and taken off the list. |
 
 Errors are plain words for the phone to show, like "Pick a time at least a minute from now." or
 "That message already went, or was canceled."

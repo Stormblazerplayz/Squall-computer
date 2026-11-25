@@ -98,7 +98,7 @@
       if (list.length >= MAX_LATER) return { error: 'There are already ' + MAX_LATER + ' messages waiting to send. Cancel one first.' };
       return { do: 'later', later: { op: 'add', chat: c.id, text: text.slice(0, 20000), at } };
     }
-    const id = String(a.id || a.itemId || '');
+    const id = String(a.itemId || '');   // not a.id: that's the action's own id
     const item = list.find(l => l && String(l.id) === id);
     if (!item) return { error: 'That message already went, or was canceled.' };
     return { do: 'later', later: { op: type === 'chat.cancelLater' ? 'cancel' : 'now', id: item.id } };

@@ -40,10 +40,10 @@ test('sendLater checks the chat, the text and the time', () => {
 
 test('cancel and send now need a message that is still waiting', () => {
   const v = view({ later: [{ id: 'l1', chat: 'dm2', text: 'Ping', at: NOW + 3600000 }] });
-  assert.deepEqual(L.routeAction(v, { type: 'chat.cancelLater', id: 'l1' }), { do: 'later', later: { op: 'cancel', id: 'l1' } });
-  assert.deepEqual(L.routeAction(v, { type: 'chat.sendLaterNow', id: 'l1' }), { do: 'later', later: { op: 'now', id: 'l1' } });
-  assert.equal(L.routeAction(v, { type: 'chat.cancelLater', id: 'nope' }).error, 'That message already went, or was canceled.');
-  assert.equal(L.routeAction(view(), { type: 'chat.sendLaterNow', id: 'l1' }).error, 'That message already went, or was canceled.');
+  assert.deepEqual(L.routeAction(v, { type: 'chat.cancelLater', itemId: 'l1' }), { do: 'later', later: { op: 'cancel', id: 'l1' } });
+  assert.deepEqual(L.routeAction(v, { type: 'chat.sendLaterNow', itemId: 'l1' }), { do: 'later', later: { op: 'now', id: 'l1' } });
+  assert.equal(L.routeAction(v, { type: 'chat.cancelLater', itemId: 'nope' }).error, 'That message already went, or was canceled.');
+  assert.equal(L.routeAction(view(), { type: 'chat.sendLaterNow', itemId: 'l1' }).error, 'That message already went, or was canceled.');
 });
 
 test('the phone sees the list soonest first, with phone chat ids, and the version changes', () => {
@@ -100,4 +100,10 @@ test('the store adds, cancels, sends now and sends what is due', () => {
   assert.match(notes[notes.length - 1][1], /didn’t go, because Squall wasn’t running then: “Old”/);
   assert.ok(changes >= 4);
   delete globalThis.localStorage;
+});
+
+test('cancel goes by itemId, never by the action’s own id', () => {
+  const v = view({ later: [{ id: 'l1', chat: 'dm2', text: 'Ping', at: NOW + 3600000 }] });
+  assert.equal(L.routeAction(v, { type: 'chat.cancelLater', id: 'l1' }).error, 'That message already went, or was canceled.');
+  assert.equal(L.routeAction(v, { type: 'chat.cancelLater', id: 'a0b1', itemId: 'l1' }).later.id, 'l1');
 });
