@@ -54,6 +54,9 @@
     usage: null,     // plan usage from the status line hook (null until it's connected)
     usageHist: [],   // readings of the 5-hour window, for the pace prediction
     usageHist7: [],  // readings of the weekly window, kept across restarts (it moves slowly), for its pace (saved)
+    throttleOn: null,  // "Slow the team down to save usage" (from the phone or the usage menu; saved): true/false, or null = team.json's throttle
+    usageLimit: null,  // also slow down once the 5-hour window reaches this percent (10 to 100; saved); null = only when the pace runs out
+    workToday: { day: '', bots: {} },   // today's jobs per bot: { day: 'YYYY-MM-DD', bots: { name: { jobs, ms } } } (saved; starts over each day)
     callWait: true,  // voice calls wait (at most 6 s) for Whisper's more accurate words before sending (Settings → Speed; saved; on by default: Storm, "Calls: Prioritize accurate words")
     echoOwn: true,   // calls use Squall's own echo canceller (it hears the speakers; Storm picked "Our own canceller"); false: the browser's (saved)
     attach: [],      // images waiting in the composer: { path, url, name } (path is empty while saving)
@@ -128,7 +131,7 @@
     // the old online voice engine's errors (gone with the offline engine) were saved into chats: clear them once
     for (const c of chats) c.messages = (c.messages || []).filter(m => !(m.kind === 'error' && /Voice recognition needs an internet connection/i.test(m.text || '')));
     for (const c of chats) for (const m of c.messages) if (m.kind === 'approve' && m.approve && m.approve.state === 'waiting') m.approve.state = 'gone';   // their runs ended with the old Squall
-    if (old) { S.sessions = savedSessions(old); S.seen = old.seen || {}; if (typeof old.liveMode === 'boolean') S.liveMode = old.liveMode; S.liveNoteHidden = !!old.liveNoteHidden; if (typeof old.readyBots === 'boolean') S.readyBots = old.readyBots; if (typeof old.callWait === 'boolean') S.callWait = old.callWait; if (typeof old.echoOwn === 'boolean') S.echoOwn = old.echoOwn; if (typeof old.trueBlack === 'boolean') S.trueBlack = old.trueBlack; if (typeof old.idleWork === 'boolean') S.idleWork = old.idleWork; if (old.starxDone) S.starxDone = true; if (old.livePending && typeof old.livePending === 'object') S.pendingSaved = old.livePending; if (old.relayModes && typeof old.relayModes === 'object') S.relayModes = old.relayModes; if (typeof old.relayMode === 'string') S.link.mode = old.relayMode; if (Array.isArray(old.usageHist7)) S.usageHist7 = old.usageHist7.slice(-400); if (typeof old.sound === 'boolean') S.sound = old.sound; S.sounds = ['all', 'ping', 'off'].includes(old.sounds) ? old.sounds : S.sound === false ? 'off' : 'all'; S.sound = S.sounds !== 'off'; if (old.voiceEngineSet && ['vosk', 'whisper', 'parakeet'].includes(old.voiceEngine)) { S.voiceEngine = old.voiceEngine; S.voiceEngineSet = true; } if (Array.isArray(old.updates)) S.updates = old.updates.slice(0, 8); if (old.modelPicked && MODELS.some(m => m.id === old.model)) { S.model = old.model; S.modelPicked = true; } S.judge = !!old.judge; if (old.workFor === 'off' || old.workFor === 'inf' || (old.workFor >= 10 && old.workFor <= 600)) S.workFor = old.workFor; }
+    if (old) { S.sessions = savedSessions(old); S.seen = old.seen || {}; if (typeof old.liveMode === 'boolean') S.liveMode = old.liveMode; S.liveNoteHidden = !!old.liveNoteHidden; if (typeof old.readyBots === 'boolean') S.readyBots = old.readyBots; if (typeof old.callWait === 'boolean') S.callWait = old.callWait; if (typeof old.echoOwn === 'boolean') S.echoOwn = old.echoOwn; if (typeof old.trueBlack === 'boolean') S.trueBlack = old.trueBlack; if (typeof old.idleWork === 'boolean') S.idleWork = old.idleWork; if (old.starxDone) S.starxDone = true; if (old.livePending && typeof old.livePending === 'object') S.pendingSaved = old.livePending; if (old.relayModes && typeof old.relayModes === 'object') S.relayModes = old.relayModes; if (typeof old.relayMode === 'string') S.link.mode = old.relayMode; if (Array.isArray(old.usageHist7)) S.usageHist7 = old.usageHist7.slice(-400); if (typeof old.sound === 'boolean') S.sound = old.sound; S.sounds = ['all', 'ping', 'off'].includes(old.sounds) ? old.sounds : S.sound === false ? 'off' : 'all'; S.sound = S.sounds !== 'off'; if (old.voiceEngineSet && ['vosk', 'whisper', 'parakeet'].includes(old.voiceEngine)) { S.voiceEngine = old.voiceEngine; S.voiceEngineSet = true; } if (Array.isArray(old.updates)) S.updates = old.updates.slice(0, 8); if (old.modelPicked && MODELS.some(m => m.id === old.model)) { S.model = old.model; S.modelPicked = true; } S.judge = !!old.judge; if (typeof old.throttleOn === 'boolean') S.throttleOn = old.throttleOn; if (Number.isInteger(old.usageLimit) && old.usageLimit >= 10 && old.usageLimit <= 100) S.usageLimit = old.usageLimit; if (old.workToday && typeof old.workToday.day === 'string' && old.workToday.bots && typeof old.workToday.bots === 'object') S.workToday = { day: old.workToday.day, bots: old.workToday.bots }; if (old.workFor === 'off' || old.workFor === 'inf' || (old.workFor >= 10 && old.workFor <= 600)) S.workFor = old.workFor; }
     if (old) { S.compacts = old.compacts || {}; S.compactNoted = old.compactNoted || {}; S.updateTold = old.updateTold && typeof old.updateTold === 'object' ? old.updateTold : {}; S.vaultTold = old.vaultTold && typeof old.vaultTold === 'object' ? old.vaultTold : {}; S.sides = old.sides && typeof old.sides === 'object' ? old.sides : {}; S.teamNews = old.teamNews && typeof old.teamNews === 'object' ? old.teamNews : {}; }
     // work timers that were running when Squall closed carry on after a restart (not in the self-test)
     if (old && old.timers && !S.selftest) for (const id of Object.keys(old.timers)) {
@@ -168,7 +171,7 @@
     const chats = S.chats.map(c => ({ id: c.id, kind: c.kind, name: c.name, members: c.members, messages: c.messages.slice(-300), unread: c.unread }));
     const timers = {};   // running work timers, so they carry on after a restart
     for (const id of Object.keys(S.timers)) timers[id] = { until: S.timers[id].until === Infinity ? 'inf' : S.timers[id].until, mins: S.timers[id].mins, paused: !!S.timers[id].paused };
-    return Bridge.call('saveState', { state: { v: 2, chats, sessions: S.sessions, seen: S.seen, active: S.active, split: S.split || null, focusRight: !!S.focusRight, liveMode: S.liveMode, liveNoteHidden: !!S.liveNoteHidden, readyBots: S.readyBots !== false, callWait: !!S.callWait, echoOwn: S.echoOwn !== false, trueBlack: S.trueBlack !== false, idleWork: S.idleWork !== false, starxDone: !!S.starxDone, livePending: pendingForSave(), relayModes: S.relayModes || {}, relayMode: S.link.mode || 'bypassPermissions', usageHist7: S.usageHist7, workFor: S.workFor, model: S.model, modelPicked: !!S.modelPicked, judge: !!S.judge, sound: S.sound, sounds: S.sounds, voiceEngine: S.voiceEngine, voiceEngineSet: !!S.voiceEngineSet, updates: S.updates || [], timers, compacts: S.compacts, compactNoted: S.compactNoted, updateTold: S.updateTold, vaultTold: S.vaultTold, sides: S.sides, teamNews: S.teamNews || {} } }).catch(() => {});
+    return Bridge.call('saveState', { state: { v: 2, chats, sessions: S.sessions, seen: S.seen, active: S.active, split: S.split || null, focusRight: !!S.focusRight, liveMode: S.liveMode, liveNoteHidden: !!S.liveNoteHidden, readyBots: S.readyBots !== false, callWait: !!S.callWait, echoOwn: S.echoOwn !== false, trueBlack: S.trueBlack !== false, idleWork: S.idleWork !== false, starxDone: !!S.starxDone, livePending: pendingForSave(), relayModes: S.relayModes || {}, relayMode: S.link.mode || 'bypassPermissions', usageHist7: S.usageHist7, throttleOn: S.throttleOn, usageLimit: S.usageLimit, workToday: S.workToday, workFor: S.workFor, model: S.model, modelPicked: !!S.modelPicked, judge: !!S.judge, sound: S.sound, sounds: S.sounds, voiceEngine: S.voiceEngine, voiceEngineSet: !!S.voiceEngineSet, updates: S.updates || [], timers, compacts: S.compacts, compactNoted: S.compactNoted, updateTold: S.updateTold, vaultTold: S.vaultTold, sides: S.sides, teamNews: S.teamNews || {} } }).catch(() => {});
   }
 
   function addMessage(chat, m) {
@@ -333,8 +336,9 @@
       if (!S.live || S.live === name || !isWorking(S.byName[S.live])) S.live = name;
       renderTeam(); renderLive();
       const warmSecs = warm === true ? CALL_WARM_S : Math.max(0, Math.round(Number(warm) || 0));   // seconds the process waits after the reply; 0: it ends
+      const startedAt = Date.now();   // for today's jobs on the phone's Plan usage screen
       Bridge.call('run', { agent: name, prompt, sessionId: S.sessions[key] || '', warm: warmSecs > 0, warmSecs, cwd: cwd || '', spare: !!spare }).then(runId => {
-        S.runs[runId] = { agent: name, key, resolve, result: null, err: [], out: [], sessionId: '' };
+        S.runs[runId] = { agent: name, key, resolve, result: null, err: [], out: [], sessionId: '', startedAt };
         a.runId = runId;
         const early = S.early[runId];
         delete S.early[runId];
@@ -487,6 +491,7 @@
     const run = S.runs[m.runId];
     if (!run) return;
     delete S.runs[m.runId];
+    countWork(m.agent, run.startedAt);
     // a teammate removed mid-run isn't on the page any more, but its run still has to finish (or its chat stays busy for good)
     const a = S.byName[m.agent] || { name: m.agent, status: '', activity: '', turns: [], numTurns: null, duration: null, cost: null };
     const r = run.result;
@@ -2028,6 +2033,8 @@
     openSettings: () => openSettings(),
     closeModal: () => closeModal(),
     sfx: name => sfx(name),
+    usage: () => usageForPhone(),
+    setUsage: r => setUsageSettings(r),
   });
 
   // "/demo farside": the team plays out a long simulated session on Farside in its own chat (Storm picked SIMULATED, 18 Oct 21:24; the
@@ -3905,21 +3912,80 @@
     const wp7 = weekPace(), wk = wp7 && wp7.w ? usageNow(wp7.w) : null;
     const week = !wk ? '' : '; week ' + Math.round(wk.percentUsed || 0) + '%' + (!wp7.ready ? '' : wp7.hitsFirst ? ', predicted to reach 100% in ' + untilText(Date.now() + wp7.hitIn * 60000) : ', about ' + wp7.atReset + '% at its reset');
     // for the bot only (Storm, 19 Oct: "Make the usage stuff not show to the user"): it paces its work by it and doesn't say it in replies
-    return 'Plan usage right now: ' + five + week + '.' + (usageTight() ? ' ' + THROTTLE_NOTE : '') + ' This is for pacing your work only: don\'t mention it in your reply unless Storm asks.';
+    return 'Plan usage right now: ' + five + week + '.' + (usageTight() ? ' ' + throttleNote() : '') + ' This is for pacing your work only: don\'t mention it in your reply unless Storm asks.';
   }
   // throttle (Storm, 19 Oct: "the team is throttled when I'm on track to hit my usage before reset"): while the 5-hour window is predicted to
   // run out before it resets, or the week to reach 100% first, work timers nudge at most every 15 minutes, sleeping bots aren't woken, and
   // every bot is told to keep its turns small. Settings can turn it off (team.throttle: false)
   const THROTTLE_NOTE = 'The team is throttled: at this pace the plan runs out before it resets. Keep this turn short, skip subagents, workflows and long test runs unless Storm asked for them, and stop once the current step is done.';
   const THROTTLE_NUDGE_MS = 30 * 60000;   // Storm, 20 Oct: "stop messaging bots so much dude you can tell what the usage is" (was 15 minutes)
-  function usageTight() {
-    if (S.selftest && !S.throttleTest) return false;
-    if (S.team && S.team.throttle === false) return false;
-    if (S.throttleTest) return true;
+  function usageTight() { return !!throttleWhy(); }
+  // Storm, 25 Nov: plan usage on the phone, with "Slow the team down to save usage" and a limit. The switch (phone or the usage menu)
+  // wins over team.json's throttle once it's been set; the limit also slows the team once the 5-hour window reaches it.
+  function throttleOn() { return typeof S.throttleOn === 'boolean' ? S.throttleOn : !(S.team && S.team.throttle === false); }
+  function fiveNow() {
     const pace = usagePace();
-    if (pace && pace.ready && !pace.reachesReset) return true;
+    return pace && pace.w ? usageNow(pace.w) : null;
+  }
+  // why the team is throttled: 'pace' (on track to run out before the reset), 'limit' (past Storm's limit) or '' (it isn't)
+  function throttleWhy() {
+    if (S.selftest && !S.throttleTest) return '';
+    if (!throttleOn()) return '';
+    if (S.throttleTest) return 'pace';
+    const pace = usagePace();
+    if (pace && pace.ready && !pace.reachesReset) return 'pace';
     const wp7 = weekPace();
-    return !!(wp7 && wp7.ready && wp7.hitsFirst);
+    if (wp7 && wp7.ready && wp7.hitsFirst) return 'pace';
+    const w = fiveNow();
+    if (S.usageLimit && w && (w.percentUsed || 0) >= S.usageLimit) return 'limit';
+    return '';
+  }
+  function throttleNote() {
+    return throttleWhy() === 'limit'
+      ? 'The team is throttled: the 5-hour window passed Storm\'s ' + S.usageLimit + '% limit. Keep this turn short, skip subagents, workflows and long test runs unless Storm asked for them, and stop once the current step is done.'
+      : THROTTLE_NOTE;
+  }
+  // the switch and the limit, from the phone (usage.settings) or the usage menu
+  function setUsageSettings(r) {
+    if (typeof r.throttle === 'boolean') S.throttleOn = r.throttle;
+    if (r.limit === null || (Number.isInteger(r.limit) && r.limit >= 10 && r.limit <= 100)) {
+      if ('limit' in r) S.usageLimit = r.limit;
+    }
+    renderUsage(); saveSoon();
+  }
+  // ---------- today's jobs per bot (timed from a run's start to its end, by Squall itself) ----------
+  function workDayKey(t) { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function workTodayNow() {
+    const k = workDayKey(Date.now());
+    if (!S.workToday || S.workToday.day !== k) S.workToday = { day: k, bots: {} };
+    return S.workToday;
+  }
+  function countWork(name, startedAt) {
+    if (!name || !startedAt || S.mock || S.selftest) return;   // demo and self-test runs aren't real work
+    const w = workTodayNow(), now = Date.now();
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    const ms = Math.max(0, now - Math.max(startedAt, midnight.getTime()));   // only the part of a job that ran today
+    const b = w.bots[name] && typeof w.bots[name] === 'object' ? w.bots[name] : (w.bots[name] = { jobs: 0, ms: 0 });
+    b.jobs = (b.jobs | 0) + 1; b.ms = (Number(b.ms) || 0) + ms;
+    saveSoon();
+  }
+  // what the phone's Plan usage screen gets (web/link.js turns it into state.usage): only what Squall really read or measured
+  function usageForPhone() {
+    const pace = usagePace(), wp7 = weekPace();
+    const windows = S.usage && Array.isArray(S.usage.windows) ? S.usage.windows.map(usageNow).map(w => ({ label: String(w.label || ''), percentUsed: Number(w.percentUsed) || 0, resetsAt: w.resetsAt || '' })) : [];
+    const today = workTodayNow();
+    return {
+      windows,
+      // when each window runs out at this pace (only when that's before its reset), as a time: the 5-hour pace counts from its newest
+      // reading and the week's hitIn from now, so the time stays put between readings
+      five: pace && pace.w ? { label: String(pace.w.label || ''), ready: !!pace.ready, atReset: pace.ready && pace.atReset != null ? pace.atReset : null,
+        outAt: pace.ready && !pace.reachesReset && S.usageHist.length ? S.usageHist[S.usageHist.length - 1].t + pace.outMin * 60000 : null } : null,
+      week: wp7 && wp7.w ? { label: String(wp7.w.label || ''), ready: !!wp7.ready, atReset: wp7.ready ? wp7.atReset : null,
+        outAt: wp7.ready && wp7.hitsFirst ? Date.now() + wp7.hitIn * 60000 : null } : null,
+      throttleOn: throttleOn(), limit: S.usageLimit, why: throttleWhy(),
+      readAt: S.usage && S.usageAt ? S.usageAt : null, overage: !!(S.usage && S.usage.overage),
+      today: { day: today.day, bots: today.bots },
+    };
   }
   function openUsageMenu() {
     closeUsageMenu(); closeModelMenu(); closeCtxMenu(); closeTimerDial();
@@ -3933,8 +3999,18 @@
       (wk7 ? '<div class="use-note">' + esc(wk7) + '</div>' : '');
     const pop = document.createElement('div');
     pop.className = 'use-pop';
-    pop.innerHTML = '<div class="use-title">Plan usage</div>' + body;
+    const why = throttleWhy();
+    // the same switch and limit as the phone's Plan usage screen (Storm, 25 Nov)
+    const limits = [null, 50, 60, 70, 80, 90];
+    const save = '<div class="use-save"><label class="use-slow"><input type="checkbox" id="use-slow"' + (throttleOn() ? ' checked' : '') + '> Slow the team down to save usage</label>' +
+      '<div class="use-row"><span>Also slow down at</span><select id="use-limit" class="set-select"' + (throttleOn() ? '' : ' disabled') + '>' +
+      limits.map(v => '<option value="' + (v || '') + '"' + ((S.usageLimit || null) === v ? ' selected' : '') + '>' + (v ? v + '% of the 5-hour window' : 'Only when it would run out') + '</option>').join('') + '</select></div>' +
+      (why ? '<div class="use-note">' + (why === 'limit' ? 'Slowing down now: the 5-hour window passed your ' + S.usageLimit + '% limit.' : 'Slowing down now: at this pace the plan runs out before it resets.') + '</div>' : '') + '</div>';
+    pop.innerHTML = '<div class="use-title">Plan usage</div>' + body + save;
     document.body.append(pop);
+    const slow = pop.querySelector('#use-slow'), lim = pop.querySelector('#use-limit');
+    if (slow) slow.addEventListener('change', () => { setUsageSettings({ throttle: slow.checked }); openUsageMenu(); });
+    if (lim) lim.addEventListener('change', () => { setUsageSettings({ limit: lim.value ? Number(lim.value) : null }); openUsageMenu(); });
     const r = $('#usage').getBoundingClientRect();
     pop.style.left = Math.max(10, Math.min(window.innerWidth - pop.offsetWidth - 10, r.left)) + 'px';
     placeTop(pop, r);

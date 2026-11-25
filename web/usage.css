@@ -14,3 +14,8 @@
 .use-bar { height: 6px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); overflow: hidden; margin-top: 6px; }
 .use-bar i { display: block; height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--aqua), var(--blue)); transition: width 0.4s ease; }
 .use-note { margin-top: 10px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.use-save { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-2); }
+.use-slow { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; cursor: pointer; }
+.use-slow input { accent-color: var(--aqua); width: 15px; height: 15px; }
+.use-save .use-row { align-items: center; }
+.use-save .set-select { margin-left: auto; max-width: 190px; font-size: 12px; }
