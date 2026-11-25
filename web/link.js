@@ -175,6 +175,67 @@
   // the pure parts, for tests/web/later.test.mjs (Node) without touching the exports below
   root.SquallLater = { phoneChatId, phoneLater, withLater, laterRoute, laterWhen, laterStore, LATER_KEY };
 
+  // ---------------------------------------------------------------- manage teammates (docs/phone-teammates.md)
+
+  // The phone's Manage teammate sheet: rename, chief on or off, and remove. app.js does the work through window.SquallTeamOps,
+  // with the same checks as the right-click menu here.
+  const TEAM_MAX = 12, CHIEFS_MAX = 4;
+  const NAME_RX = /^[A-Za-z][A-Za-z0-9]{1,19}$/;
+  const NAME_HELP = 'Use a short name: letters and digits, starting with a letter (2 to 20 characters).';
+
+  function leadOf(view) {
+    const agents = (view && view.agents) || [];
+    return view && view.lead ? view.lead : (agents.find(a => a && a.lead) || agents[0] || {}).name;
+  }
+
+  // Adds bots[].chief and state.team { size, max, chiefs, maxChiefs, manage }, then works the version out again
+  function withTeam(state, view) {
+    const agents = ((view && view.agents) || []).filter(a => a && a.name);
+    const ids = botIds(agents, leadOf(view));
+    const chiefIds = new Set(agents.filter(a => a.lead).map(a => ids[a.name]));
+    for (const b of state.bots || []) if (chiefIds.has(b.id)) b.chief = true;
+    state.team = { size: agents.length, max: TEAM_MAX, chiefs: chiefIds.size, maxChiefs: CHIEFS_MAX, manage: !!(view && view.manage) };
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  // bot.rename { botId, name }, bot.chief { botId, on }, bot.remove { botId, confirm: the name the phone showed }.
+  // Returns null for any other action (so the usual routes handle it), else { do, ... } or { error }
+  function teamRoute(view, a) {
+    const type = a && typeof a.type === 'string' ? a.type : '';
+    if (type !== 'bot.rename' && type !== 'bot.chief' && type !== 'bot.remove') return null;
+    const name = nameFor(view, String(a.botId || ''));
+    if (!name) return { error: 'That teammate isn’t on the team any more.' };
+    if (type === 'bot.rename') {
+      const to = String(a.name || '').trim();
+      if (!NAME_RX.test(to)) return { error: NAME_HELP };
+      const taken = ((view && view.agents) || []).some(x => x && x.name && x.name !== name && x.name.toLowerCase() === to.toLowerCase());
+      if (taken) return { error: to + ' is already on the team.' };
+      return { do: 'rename', name, to };
+    }
+    if (type === 'bot.chief') {
+      if (typeof a.on !== 'boolean') return { error: 'Say whether it should be a chief.' };
+      return { do: 'chief', name, on: a.on };
+    }
+    // a screen that was open while the team changed can't remove the wrong teammate
+    if (String(a.confirm || '') !== name) return { error: 'The team changed. Open the teammate again and try once more.' };
+    return { do: 'remove', name };
+  }
+
+  // Does what teamRoute worked out. ops: window.SquallTeamOps; after: reads the view again once the change is in
+  async function teamDo(r, ops, after) {
+    if (r.error) return { ok: false, error: r.error };
+    if (!ops) return { ok: false, error: CANT };
+    if (r.do === 'chief') { await ops.chief(r.name, r.on); return { ok: true }; }
+    if (r.do === 'remove') { await ops.remove(r.name); return { ok: true }; }
+    const newName = await ops.rename(r.name, r.to);
+    const v = await after();
+    const id = botIds((v && v.agents) || [], leadOf(v))[newName];
+    return id ? { ok: true, id } : { ok: true };
+  }
+
+  root.SquallTeam = { withTeam, teamRoute, teamDo, TEAM_MAX, CHIEFS_MAX };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -443,7 +504,7 @@
     // messages set to send later (see "send later" above): the phone's state and actions see the list
     const later = laterStore(h, () => pushNow());
     const laterView = () => Object.assign(view(), { later: later.list() });
-    const phoneState = () => { const v = laterView(); return withLater(buildState(v), v); };
+    const phoneState = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); return withTeam(withLater(buildState(v), v), v); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -540,7 +601,11 @@
     h.Bridge.on('linkAsk', async m => {
       let result;
       try {
-        if (m.kind === 'action') result = await doAction(m.body || {});
+        if (m.kind === 'action') {
+          // Manage teammate first (bot.rename, bot.chief, bot.remove); everything else goes the usual way
+          const team = teamRoute(view(), m.body || {});
+          result = team ? await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); }) : await doAction(m.body || {});
+        }
         else if (m.kind === 'voice') result = await doVoice(m.body || {});
         else if (m.kind === 'voiceEnd') {
           const chief = chatFor(view(), CHIEF);

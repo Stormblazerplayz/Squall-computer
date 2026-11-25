@@ -4665,6 +4665,62 @@
     noteTeamChange(r.name + ' was removed from the team.');
     teamChanged();
   }
+  // Manage teammate on the phone (squall-computer docs/phone-teammates.md): rename, chief on or off and remove, with the same checks as
+  // the right-click menu here. A rename or a remove reloads the window like New teammate from the phone does: a moment later, so the
+  // phone hears back first. link.js reads these through window.SquallTeamOps
+  function phoneTeamBot(name) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const chat = chatById('dm:' + a.name);
+    if (agentBusy(a) || a.waking || (chat && S.flows[chat.id])) throw new Error(a.name + ' is working right now. Try again when it’s done.');
+    return a;
+  }
+  async function phoneRenameBot(from, to) {
+    const a = phoneTeamBot(from);
+    to = String(to || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9]{1,19}$/.test(to)) throw new Error('Use a short name: letters and digits, starting with a letter (2 to 20 characters).');
+    if (to === a.name) return a.name;
+    if (S.agents.some(x => x !== a && x.name.toLowerCase() === to.toLowerCase())) throw new Error(to + ' is already on the team.');
+    const r = await Bridge.call('teamRename', { from: a.name, to, byBot: false });
+    migrateRename(a.name, r.name);
+    if (S.teamNews && S.teamNews[a.name]) { S.teamNews[r.name] = S.teamNews[a.name]; delete S.teamNews[a.name]; }
+    noteTeamChange(a.name + ' was renamed to ' + r.name + ' (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneRemoveBot(name) {
+    const a = phoneTeamBot(name);
+    if (a.lead && S.agents.filter(x => x.lead).length <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamRemove', { name: a.name });
+    migrateRemove(r.name);
+    if (S.teamNews) delete S.teamNews[r.name];
+    noteTeamChange(r.name + ' was removed from the team (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneSetChief(name, on) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    if (!!a.lead === !!on) return !!a.lead;
+    const chiefs = S.agents.filter(x => x.lead).length;
+    if (on && chiefs >= 4) throw new Error('The team already has 4 chiefs. Take one off first.');
+    if (!on && chiefs <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamChief', { name: a.name, chief: !!on });
+    a.lead = !!r.lead;
+    S.chiefs = S.agents.filter(x => x.lead);
+    S.lead = S.chiefs[0] || S.lead;
+    for (const c of S.chats) if (c.kind === 'group') { const ch = S.chiefs.find(x => c.members.includes(x.name)); c.lead = ch ? ch.name : c.members[0]; }
+    renderTeam(); renderChatHead();
+    teamNote(chatById('team'), a.name + (a.lead ? ' is now a chief (from the phone).' : ' is no longer a chief (from the phone).'));
+    noteTeamChange(a.name + (a.lead ? ' was promoted to chief.' : ' is no longer a chief.'));
+    saveSoon();
+    return a.lead;
+  }
+  window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief };
   // keep the chats, sessions and timers that belong to a renamed or deleted bot in step with team.json
   function migrateRename(from, to) {
     for (const c of S.chats) {
