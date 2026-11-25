@@ -290,6 +290,93 @@
 
   root.SquallTeam = { withTeam, teamRoute, teamDo, projectList, projectName, projectCache, TEAM_MAX, CHIEFS_MAX };
 
+  // ---------------------------------------------------------------- notes (docs/phone-notes.md)
+
+  // The Obsidian vault on the phone: search it, read a note and add text to the end of one. The phone asks with an action and the
+  // answer comes in the next state as state.notes, so nothing new is needed in the phone API. Only notes the computer listed can be
+  // read or added to, and the answer leaves the state when the phone hasn't asked for 10 minutes.
+  const NOTES_MAX = 40, NOTE_MAX_TEXT = 20000, NOTE_ADD_MAX = 2000, NOTES_IDLE = 10 * 60000;
+
+  function noteName(path) { return String(path || '').replace(/\.md$/i, '').split('/').pop(); }
+
+  // notes.search { query }, notes.open { path }, notes.close, notes.append { path, text }. known: the paths the phone was shown
+  function notesRoute(a, known) {
+    const type = a && typeof a.type === 'string' ? a.type : '';
+    if (!/^notes\.(search|open|close|append)$/.test(type)) return null;
+    if (type === 'notes.search') return { do: 'search', query: String(a.query || '').trim().slice(0, 200) };
+    if (type === 'notes.close') return { do: 'close' };
+    const path = String(a.path || '');
+    if (!path || !known.has(path)) return { error: 'That note isn’t in the list any more. Search again.' };
+    if (type === 'notes.open') return { do: 'open', path };
+    const text = String(a.text || '').trim();
+    if (!text) return { error: 'There’s nothing to add.' };
+    if (text.length > NOTE_ADD_MAX) return { error: 'That’s too long to add from the phone (2,000 characters at most).' };
+    return { do: 'append', path, text };
+  }
+
+  // search rows [{ path, snippet }] or graph nodes [{ path, name }] as the phone's list: [{ path, name, snippet }]
+  function noteRows(rows) {
+    const out = [], seen = new Set();
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (!r || typeof r.path !== 'string' || !r.path || seen.has(r.path)) continue;
+      seen.add(r.path);
+      out.push({ path: r.path, name: String(r.name || noteName(r.path)), snippet: String(r.snippet || '').slice(0, 240) });
+      if (out.length >= NOTES_MAX) break;
+    }
+    return out;
+  }
+
+  // holds what the phone asked for: { query, results, note, error, at }
+  function notesDesk(ops, now) {
+    let st = null;
+    const known = new Set();
+    function remember(list) { for (const r of list) known.add(r.path); }
+    async function run(r) {
+      if (r.error) return { ok: false, error: r.error };
+      const o = ops();
+      if (!o) return { ok: false, error: CANT };
+      const t = now();
+      if (r.do === 'close') { if (st) st = Object.assign({}, st, { note: null, at: t }); return { ok: true }; }
+      if (r.do === 'search') {
+        let rows;
+        if (r.query) rows = await o.search(r.query);
+        else rows = ((await o.list()) || []).slice().sort((x, y) => String(x.path).localeCompare(String(y.path)));
+        const results = noteRows(rows);
+        remember(results);
+        st = { query: r.query, results, note: st && st.note, at: t };
+        return { ok: true };
+      }
+      const read = async path => {
+        const text = String((await o.read(path)) || '');
+        return { path, name: noteName(path), text: text.slice(0, NOTE_MAX_TEXT), cut: text.length > NOTE_MAX_TEXT };
+      };
+      if (r.do === 'open') {
+        const note = await read(r.path);
+        st = Object.assign({ query: '', results: [] }, st || {}, { note, at: t });
+        return { ok: true };
+      }
+      await o.append(r.path, r.text);
+      const note = await read(r.path);
+      st = Object.assign({ query: '', results: [] }, st || {}, { note, at: t });
+      return { ok: true };
+    }
+    return {
+      route: a => notesRoute(a, known),
+      run,
+      // state.notes while the phone is using it
+      view: () => (st && now() - st.at < NOTES_IDLE ? st : null),
+    };
+  }
+
+  function withNotes(state, notes) {
+    if (!notes) return state;
+    state.notes = { query: notes.query || '', results: notes.results || [], note: notes.note || null };
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  root.SquallNotes = { notesRoute, noteRows, noteName, notesDesk, withNotes, NOTES_MAX, NOTE_MAX_TEXT };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -560,7 +647,8 @@
     const laterView = () => Object.assign(view(), { later: later.list() });
     const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
     const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
-    const phoneState = () => { const v = teamView(); return withTeam(withLater(buildState(v), v), v); };
+    const notes = notesDesk(() => root.SquallNotesOps, () => Date.now());
+    const phoneState = () => { const v = teamView(); return withNotes(withTeam(withLater(buildState(v), v), v), notes.view()); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -660,7 +748,10 @@
         if (m.kind === 'action') {
           // Manage teammate first (bot.rename, bot.chief, bot.remove); everything else goes the usual way
           const team = teamRoute(teamView(), m.body || {});
-          result = team ? await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); }) : await doAction(m.body || {});
+          const note = team ? null : notes.route(m.body || {});
+          if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
+          else if (note) { result = await notes.run(note); await pushNow(); }
+          else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }
         else if (m.kind === 'voice') result = await doVoice(m.body || {});

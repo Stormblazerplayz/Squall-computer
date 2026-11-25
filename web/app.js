@@ -4737,6 +4737,14 @@
     return a.folder;
   }
   window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief, projects: phoneProjects, setFolder: phoneSetFolder };
+  // the Obsidian vault on the phone (squall-computer docs/phone-notes.md): the same search, read and add-a-line as the vault window here.
+  // Nothing is removed or overwritten
+  window.SquallNotesOps = {
+    search: q => Bridge.call('vaultSearch', { query: q }),
+    read: path => Bridge.call('vaultRead', { path }),
+    append: (path, text) => Bridge.call('vaultAppend', { path, text }),
+    list: async () => { const d = await Bridge.call('vaultGraph'); return (d && d.nodes) || []; },
+  };
   // keep the chats, sessions and timers that belong to a renamed or deleted bot in step with team.json
   function migrateRename(from, to) {
     for (const c of S.chats) {
