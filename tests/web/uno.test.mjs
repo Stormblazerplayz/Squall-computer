@@ -658,3 +658,123 @@ test('the Uno tab starts a task, tells a busy one, runs an old one again, and sh
     delete globalThis.SquallLinkCore;
   }
 });
+
+// ---------------------------------------------------------------- the big screen's zoom
+
+test('big screen: zoom stays from 1x to 4x', () => {
+  assert.equal(U.clampZoom(0.2), 1);
+  assert.equal(U.clampZoom(1), 1);
+  assert.equal(U.clampZoom(2.5), 2.5);
+  assert.equal(U.clampZoom(4), 4);
+  assert.equal(U.clampZoom(11), 4);
+  assert.equal(U.clampZoom(-3), 1);
+  assert.equal(U.clampZoom(NaN), 1);
+  assert.equal(U.clampZoom(Infinity), 1);
+  assert.equal(U.clampZoom('x'), 1);
+  assert.equal(U.clampZoom(undefined), 1);
+});
+
+test('big screen: the picture can never be moved off the box', () => {
+  // 1000×625 box at 2x: the picture is 2000×1250, so it can move 0..-1000 sideways and 0..-625 up and down
+  assert.deepEqual(U.clampPan({ s: 2, x: 50, y: 50 }, 1000, 625), { s: 2, x: 0, y: 0 });
+  assert.deepEqual(U.clampPan({ s: 2, x: -5000, y: -5000 }, 1000, 625), { s: 2, x: -1000, y: -625 });
+  assert.deepEqual(U.clampPan({ s: 2, x: -300, y: -200 }, 1000, 625), { s: 2, x: -300, y: -200 });
+  // at 1x it never moves
+  assert.deepEqual(U.clampPan({ s: 1, x: -300, y: 40 }, 1000, 625), { s: 1, x: 0, y: 0 });
+  assert.deepEqual(U.clampPan({ s: 0.5, x: -300, y: 40 }, 1000, 625), { s: 1, x: 0, y: 0 });
+  // bad input is safe
+  assert.deepEqual(U.clampPan({ s: 3, x: NaN, y: 'a' }, 1000, 625), { s: 3, x: 0, y: 0 });
+  assert.deepEqual(U.clampPan(null, 1000, 625), { s: 1, x: 0, y: 0 });
+  assert.deepEqual(U.clampPan({ s: 3, x: -10, y: -10 }, 0, 0), { s: 3, x: 0, y: 0 });
+});
+
+test('big screen: zooming keeps the spot under the pointer still', () => {
+  const W = 1000, H = 625;
+  const z = U.zoomAt({ s: 1, x: 0, y: 0 }, 2, 250, 125, W, H);
+  assert.equal(z.s, 2);
+  assert.deepEqual([z.x, z.y], [-250, -125]);
+  // the box spot (250, 125) still shows at (250, 125): x + s * q
+  assert.equal(z.x + z.s * 250, 250);
+  assert.equal(z.y + z.s * 125, 125);
+  // zoom further around another spot, from a zoomed state
+  const z2 = U.zoomAt(z, 4, 600, 300, W, H);
+  const q = U.unzoomPoint(600, 300, z);
+  assert.ok(Math.abs(z2.x + z2.s * q.x - 600) < 1e-9 && Math.abs(z2.y + z2.s * q.y - 300) < 1e-9);
+  // near a corner the edge wins: the picture stays in the box
+  const c = U.zoomAt({ s: 1, x: 0, y: 0 }, 3, 0, 0, W, H);
+  assert.deepEqual(c, { s: 3, x: 0, y: 0 });
+  const c2 = U.zoomAt({ s: 1, x: 0, y: 0 }, 3, W, H, W, H);
+  assert.deepEqual(c2, { s: 3, x: -2000, y: -1250 });
+  // past 4x stops at 4x, and zooming out to 1x always recenters
+  assert.equal(U.zoomAt(z, 40, 10, 10, W, H).s, 4);
+  assert.deepEqual(U.zoomAt(z2, 0.1, 10, 10, W, H), { s: 1, x: 0, y: 0 });
+  // no pointer: around the middle
+  assert.deepEqual(U.zoomAt(null, 2, NaN, NaN, W, H), { s: 2, x: -500, y: -312.5 });
+});
+
+test('big screen: ctrl + wheel steps in and out smoothly, within 1x to 4x', () => {
+  const W = 1000, H = 625, none = { s: 1, x: 0, y: 0 };
+  const inOnce = U.wheelZoom(none, -100, 500, 300, W, H);
+  assert.ok(inOnce.s > 1.2 && inOnce.s < 1.25);   // e^0.2 ≈ 1.22
+  assert.deepEqual(U.wheelZoom(none, 100, 500, 300, W, H), none);   // can't go below 1x
+  let z = none;
+  for (let i = 0; i < 40; i++) z = U.wheelZoom(z, -120, 500, 300, W, H);
+  assert.equal(z.s, 4);
+  // one huge flick is capped, not a jump to 4x
+  assert.ok(U.wheelZoom(none, -100000, 500, 300, W, H).s < 1.9);
+  assert.deepEqual(U.wheelZoom(none, 'x', 500, 300, W, H), none);
+});
+
+test('big screen: double-click goes to 2.5x around the spot, and back to 1x', () => {
+  const W = 1000, H = 625;
+  const z = U.toggleZoom({ s: 1, x: 0, y: 0 }, 400, 250, W, H);
+  assert.equal(z.s, 2.5);
+  assert.equal(z.x + z.s * 400, 400);
+  assert.equal(z.y + z.s * 250, 250);
+  assert.deepEqual(U.toggleZoom(z, 100, 100, W, H), { s: 1, x: 0, y: 0 });
+  // near the right edge it zooms in as far toward the spot as the edge allows
+  const e = U.toggleZoom(null, W, H / 2, W, H);
+  assert.deepEqual([e.s, e.x], [2.5, -1500]);
+});
+
+test('big screen: dragging moves the zoomed picture but not past its edges, and does nothing at 1x', () => {
+  const W = 1000, H = 625;
+  const start = { s: 2, x: -500, y: -300 };
+  assert.deepEqual(U.panBy(start, 120, -40, W, H), { s: 2, x: -380, y: -340 });
+  assert.deepEqual(U.panBy(start, 9999, 9999, W, H), { s: 2, x: 0, y: 0 });
+  assert.deepEqual(U.panBy(start, -9999, -9999, W, H), { s: 2, x: -1000, y: -625 });
+  assert.deepEqual(U.panBy({ s: 1, x: 0, y: 0 }, 300, 300, W, H), { s: 1, x: 0, y: 0 });
+});
+
+test('big screen: a click while zoomed lands on the computer pixel under the pointer', () => {
+  // a 1280×800 computer shown in a 640×400 box (half size), zoomed 2x and moved to its middle
+  const W = 640, H = 400, z = { s: 2, x: -320, y: -200 };
+  // the middle of the box shows the middle of the computer
+  assert.deepEqual(U.zoomedDisplayToScreen(320, 200, W, H, 1280, 800, z), { x: 640, y: 400 });
+  // the top-left of the box shows a quarter of the way in
+  assert.deepEqual(U.zoomedDisplayToScreen(0, 0, W, H, 1280, 800, z), { x: 320, y: 200 });
+  assert.deepEqual(U.zoomedDisplayToScreen(639.9, 399.9, W, H, 1280, 800, z), { x: 959, y: 599 });
+  // not zoomed (or no zoom given) it's exactly displayToScreen
+  for (const [px, py] of [[0, 0], [100.5, 77], [639, 399], [320, 200]]) {
+    assert.deepEqual(U.zoomedDisplayToScreen(px, py, W, H, 1280, 800, null), U.displayToScreen(px, py, W, H, 1280, 800));
+    assert.deepEqual(U.zoomedDisplayToScreen(px, py, W, H, 1280, 800, { s: 1, x: 0, y: 0 }), U.displayToScreen(px, py, W, H, 1280, 800));
+  }
+  // a move that would show past the edge is clamped first, so the pixel matches what's drawn
+  assert.deepEqual(U.zoomedDisplayToScreen(0, 0, W, H, 1280, 800, { s: 2, x: 500, y: 500 }), { x: 0, y: 0 });
+  // the letterbox (a wider box than the screen) is still not the computer
+  assert.equal(U.zoomedDisplayToScreen(10, 200, 800, 400, 1280, 800, { s: 1, x: 0, y: 0 }), null);
+  assert.equal(U.zoomedDisplayToScreen(NaN, 0, W, H, 1280, 800, z), null);
+  // unzoomPoint is the inverse of x + s * q
+  assert.deepEqual(U.unzoomPoint(100, 60, { s: 4, x: -300, y: -100 }), { x: 100, y: 40 });
+  assert.deepEqual(U.unzoomPoint(100, 60, null), { x: 100, y: 60 });
+});
+
+test('big screen: the transform and the zoom chip', () => {
+  assert.equal(U.zoomCss({ s: 1, x: 0, y: 0 }), '');
+  assert.equal(U.zoomCss(null), '');
+  assert.equal(U.zoomCss({ s: 2.5, x: -150.123, y: -40 }), 'translate(-150.12px, -40px) scale(2.5)');
+  assert.equal(U.zoomLabel({ s: 2.5 }), '2.5×');
+  assert.equal(U.zoomLabel({ s: 1.2214 }), '1.2×');
+  assert.equal(U.zoomLabel({ s: 4 }), '4×');
+  assert.equal(U.zoomLabel(null), '1×');
+});

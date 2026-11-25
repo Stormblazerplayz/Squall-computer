@@ -277,6 +277,89 @@
     return { w: Math.floor(width * scale), h: Math.floor(height * scale) };
   }
 
+  // ---------------------------------------------------------------- zoom (the big screen)
+  // The big screen's zoom is { s, x, y }: the picture is scaled by s from the box's top-left corner, then moved by x, y
+  // pixels, so a point q in the unzoomed box shows at x + s * q. s stays from 1 to 4, and the picture always covers the box.
+
+  const ZOOM_MIN = 1, ZOOM_MAX = 4, ZOOM_TAP = 2.5;
+  const ZOOM_NONE = Object.freeze({ s: 1, x: 0, y: 0 });
+
+  // A zoom level kept from 1x to 4x (anything that isn't a number is 1x).
+  function clampZoom(s) {
+    s = +s;
+    if (!Number.isFinite(s)) return ZOOM_MIN;
+    return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, s));
+  }
+
+  // The zoom with its move kept so no edge of the picture comes inside the box. At 1x the move is always 0, 0.
+  function clampPan(z, boxW, boxH) {
+    const s = clampZoom(z && z.s);
+    if (!(boxW > 0) || !(boxH > 0) || s === ZOOM_MIN) return { s, x: 0, y: 0 };
+    const n = v => (Number.isFinite(+v) ? +v : 0);
+    return {
+      s,
+      x: Math.min(0, Math.max(boxW - boxW * s, n(z.x))),
+      y: Math.min(0, Math.max(boxH - boxH * s, n(z.y))),
+    };
+  }
+
+  // Zooms to `scale` keeping the spot under the pointer (px, py in the box) where it is, as far as the edges allow.
+  function zoomAt(z, scale, px, py, boxW, boxH) {
+    const cur = clampPan(z || ZOOM_NONE, boxW, boxH);
+    const s = clampZoom(scale);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) { px = boxW / 2; py = boxH / 2; }
+    const qx = (px - cur.x) / cur.s, qy = (py - cur.y) / cur.s;
+    return clampPan({ s, x: px - qx * s, y: py - qy * s }, boxW, boxH);
+  }
+
+  // Ctrl + mouse wheel (or a trackpad pinch): a smooth step in or out around the pointer. deltaY < 0 zooms in.
+  function wheelZoom(z, deltaY, px, py, boxW, boxH) {
+    const cur = clampPan(z || ZOOM_NONE, boxW, boxH);
+    const d = Math.max(-300, Math.min(300, Number.isFinite(+deltaY) ? +deltaY : 0));
+    return zoomAt(cur, cur.s * Math.exp(-d * 0.002), px, py, boxW, boxH);
+  }
+
+  // A double-click: 2.5x around the spot, or back to 1x when zoomed in.
+  function toggleZoom(z, px, py, boxW, boxH) {
+    const cur = clampPan(z || ZOOM_NONE, boxW, boxH);
+    if (cur.s > ZOOM_MIN + 0.001) return { s: 1, x: 0, y: 0 };
+    return zoomAt(cur, ZOOM_TAP, px, py, boxW, boxH);
+  }
+
+  // A drag while zoomed in: the zoom the drag started at, moved by dx, dy (kept in bounds). Nothing moves at 1x.
+  function panBy(z, dx, dy, boxW, boxH) {
+    const cur = clampPan(z || ZOOM_NONE, boxW, boxH);
+    return clampPan({ s: cur.s, x: cur.x + (+dx || 0), y: cur.y + (+dy || 0) }, boxW, boxH);
+  }
+
+  // A pointer on the zoomed box (px, py from its top-left) to the same spot on the unzoomed box.
+  function unzoomPoint(px, py, z) {
+    const s = clampZoom(z && z.s);
+    const x = z && Number.isFinite(+z.x) ? +z.x : 0, y = z && Number.isFinite(+z.y) ? +z.y : 0;
+    return { x: (px - x) / s, y: (py - y) / s };
+  }
+
+  // displayToScreen with the big screen's zoom: the computer pixel under the pointer, or null in the letterbox.
+  function zoomedDisplayToScreen(px, py, boxW, boxH, width, height, z) {
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+    const q = unzoomPoint(px, py, clampPan(z || ZOOM_NONE, boxW, boxH));
+    return displayToScreen(q.x, q.y, boxW, boxH, width, height);
+  }
+
+  // The CSS transform for a zoom ('' at 1x).
+  function zoomCss(z) {
+    const s = clampZoom(z && z.s);
+    if (s === ZOOM_MIN) return '';
+    const r = v => Math.round((Number.isFinite(+v) ? +v : 0) * 100) / 100;
+    return 'translate(' + r(z.x) + 'px, ' + r(z.y) + 'px) scale(' + r(s) + ')';
+  }
+
+  // "2.5×" for the zoom chip.
+  function zoomLabel(z) {
+    const s = clampZoom(z && z.s);
+    return (Math.round(s * 10) / 10).toString() + '×';
+  }
+
   // ---------------------------------------------------------------- motion (what the live screen animates)
   // Only real events and frames move anything here: a glide to where the mouse really went, a ripple where it really
   // clicked, the text it really typed, the keys it really pressed. With "reduce motion" on, everything shows at once.
@@ -548,6 +631,8 @@
     monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
     back: '<path d="M15 6l-6 6 6 6"/>',
     download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+    expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    shrink: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
   };
   const svg = (name, size) => name === 'bolt' ? ICONS.bolt : '<svg viewBox="0 0 24 24" width="' + (size || 14) + '" height="' + (size || 14) + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || ICONS.dot) + '</svg>';
   const CURSOR_SVG = '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 2.5 4 19l4.4-4.2 2.9 6.7 2.6-1.1-2.9-6.6H17z" fill="#fff" stroke="#0b0a12" stroke-width="1.4" stroke-linejoin="round"/></svg>';
@@ -685,6 +770,7 @@
       open: false, agentId: null, agentName: '', watching: null, viewSession: null, wheelLocal: false, clickMode: 'left_click',
       settings: false, err: '', note: '', checkText: '', busy: {}, lastPush: 0, loaded: false, missing: '', refreshing: false,
       shownSeq: 0, screenW: 1280, screenH: 800, hover: null, cursor: null, localClickAt: 0,
+      big: false, zoom: { s: 1, x: 0, y: 0 }, panMovedAt: 0,
     };
 
     // ---------------- talking to the host ----------------
@@ -1032,7 +1118,7 @@
       if (h.beforeOpen) { try { h.beforeOpen(); } catch (e) { /* the chat side couldn't close something: the view still opens */ } }
       const same = ui.open && ui.agentId === agentId;
       ui.open = true; ui.agentId = agentId; ui.agentName = a ? a.agentName : agentId;
-      if (!same) { ui.viewSession = null; ui.wheelLocal = false; ui.err = ''; ui.note = ''; ui.shownSeq = 0; ui.settings = false; }
+      if (!same) { ui.viewSession = null; ui.wheelLocal = false; ui.err = ''; ui.note = ''; ui.shownSeq = 0; ui.settings = false; ui.zoom = { s: 1, x: 0, y: 0 }; }
       build();
       const center = document.getElementById('center');
       if (center) center.classList.add('uno-on');
@@ -1048,6 +1134,7 @@
 
     function close() {
       if (!ui.open) return;
+      setBig(false);
       ui.open = false;
       setWatch(null);
       const center = document.getElementById('center');
@@ -1068,6 +1155,8 @@
         view.addEventListener('keydown', onKey);
         view.addEventListener('wheel', onWheel, { passive: false });
         view.addEventListener('mousemove', onMove);
+        view.addEventListener('mousedown', onPanStart);
+        view.addEventListener('dblclick', onDblClick);
         view.addEventListener('mouseleave', () => { ui.hover = null; paintChip(); });
         if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => layoutScreen()).observe(view);
         else root.addEventListener('resize', layoutScreen);
@@ -1080,7 +1169,10 @@
         '<div class="uno-flash" hidden></div>' +
         '<div class="uno-body">' +
           '<div class="uno-main">' +
-            '<div class="uno-stage"><div class="uno-box"><img class="uno-img" alt="" draggable="false"><div class="uno-cursor" hidden>' + CURSOR_SVG + '</div><div class="uno-ripples"></div><div class="uno-chip" hidden></div><div class="uno-empty" hidden></div></div></div>' +
+            '<div class="uno-stage"><div class="uno-box"><div class="uno-zoom"><img class="uno-img" alt="" draggable="false"><div class="uno-cursor" hidden>' + CURSOR_SVG + '</div><div class="uno-ripples"></div></div>' +
+              '<div class="uno-chip" hidden></div><div class="uno-empty" hidden></div>' +
+              '<div class="uno-boxbtns"><button class="uno-boxbtn uno-zoomlvl" data-u="zoomReset" title="Back to 1×" hidden></button>' +
+              '<button class="uno-boxbtn uno-bigbtn" data-u="big"></button></div></div></div>' +
             '<div class="uno-now"><span class="uno-now-l"></span><span class="uno-now-t"></span></div>' +
             '<div class="uno-ctrls"></div>' +
             '<div class="uno-wheel" hidden>' +
@@ -1215,6 +1307,13 @@
       renderFilm(sess);
       renderRecent(cur, sess);
       renderSettings();
+      const bb = $u('.uno-bigbtn');
+      if (bb) {
+        const html = ui.big ? svg('shrink', 13) + '<span>Exit big screen</span>' : svg('expand', 13) + '<span>Big screen</span>';
+        if (bb._html !== html) { bb.innerHTML = html; bb._html = html; }
+        bb.title = ui.big ? 'Back to the normal view (Esc)' : 'Fill the window with the screen. Ctrl + wheel zooms in.';
+        bb.setAttribute('aria-pressed', ui.big ? 'true' : 'false');
+      }
       layoutScreen();
     }
 
@@ -1295,7 +1394,7 @@
       fx.className = 'uno-fx';
       fx.setAttribute('aria-hidden', 'true');
       fx.innerHTML = '<div class="uno-camflash"></div><div class="uno-bubble uno-typing" hidden></div><div class="uno-bubble uno-keycap" hidden></div>';
-      box.appendChild(fx);
+      (box.querySelector('.uno-zoom') || box).appendChild(fx);
       return fx;
     }
     function screenImgs() { ensureFx(); return view ? Array.from(view.querySelectorAll('.uno-box .uno-img')) : []; }
@@ -1521,12 +1620,105 @@
       if (!ui.open || !view) return;
       const stage = $u('.uno-stage'), box = $u('.uno-box');
       if (!stage || !box) return;
+      // the big screen: the stage takes all the room the window has; otherwise about half the window's height
+      if (ui.big) stage.style.height = '';
       const areaW = stage.clientWidth;
-      const areaH = Math.max(200, Math.min((root.innerHeight || 800) * 0.56, 640));
+      const areaH = ui.big ? Math.max(200, stage.clientHeight) : Math.max(200, Math.min((root.innerHeight || 800) * 0.56, 640));
       const fit = fitBox(areaW, areaH, ui.screenW || 1280, ui.screenH || 800);
       if (!fit.w) return;
       box.style.width = fit.w + 'px'; box.style.height = fit.h + 'px';
-      stage.style.height = fit.h + 'px';
+      if (!ui.big) stage.style.height = fit.h + 'px';
+      paintZoom(false);
+    }
+
+    // ---------------- the big screen ----------------
+    // A class on the view (not the browser's full screen) makes the live screen fill the window. In it, Ctrl + wheel
+    // zooms 1x to 4x around the pointer, a drag moves around while zoomed, and a double-click goes 2.5x / 1x.
+    // Clicks still only reach the computer while you have the wheel, at the computer pixel under the zoomed pointer.
+
+    function setBig(on) {
+      on = !!on && ui.open;
+      if (ui.big === on) return;
+      ui.big = on;
+      ui.zoom = { s: 1, x: 0, y: 0 };
+      if (view) view.classList.toggle('uno-big', on);
+      if (document.body) document.body.classList.toggle('uno-big', on);
+      if (ui.open) render();
+    }
+
+    // The pointer inside the screen box: px, py from the inside of its border, and the box's inner size.
+    function boxPoint(box, e) {
+      const rect = box.getBoundingClientRect();
+      return { px: e.clientX - rect.left - (box.clientLeft || 0), py: e.clientY - rect.top - (box.clientTop || 0), w: box.clientWidth || rect.width, h: box.clientHeight || rect.height };
+    }
+    // The computer pixel under the pointer, with the big screen's zoom (or null in the letterbox).
+    function screenPointOf(box, e) {
+      const b = boxPoint(box, e);
+      return zoomedDisplayToScreen(b.px, b.py, b.w, b.h, ui.screenW, ui.screenH, ui.big ? ui.zoom : null);
+    }
+
+    function paintZoom(ease) {
+      const box = $u('.uno-box'), layer = $u('.uno-zoom');
+      if (!box || !layer) return;
+      if (!ui.big) ui.zoom = { s: 1, x: 0, y: 0 };
+      else ui.zoom = clampPan(ui.zoom, box.clientWidth, box.clientHeight);
+      const css = zoomCss(ui.zoom);
+      layer.classList.toggle('ease', !!ease && !reduced());
+      if (layer.style.transform !== css) layer.style.transform = css;
+      const zoomed = ui.zoom.s > 1;
+      box.classList.toggle('zoomed', zoomed);
+      const lvl = $u('.uno-zoomlvl');
+      if (lvl) { lvl.hidden = !zoomed; const t = zoomLabel(ui.zoom); if (lvl.textContent !== t) lvl.textContent = t; }
+    }
+
+    function setZoom(z, ease) {
+      ui.zoom = z;
+      paintZoom(ease);
+      if (ui.hover) { ui.hover = null; paintChip(); }
+    }
+
+    // Where zoom gestures apply: the big screen's live picture (not the replay, a message or the corner buttons).
+    function zoomTarget(t) {
+      if (!ui.big || film.replay || !t || !t.closest) return null;
+      const box = t.closest('.uno-box');
+      if (!box || t.closest('.uno-boxbtns') || t.closest('.uno-empty:not([hidden])') || t.closest('.uno-replay')) return null;
+      return box;
+    }
+
+    const pan = { box: null, x: 0, y: 0, z: null, moved: false };
+    function onPanStart(e) {
+      if (e.button !== 0) return;
+      const box = zoomTarget(e.target);
+      if (!box || ui.zoom.s <= 1) return;
+      e.preventDefault();   // no text selection or picture drag while moving around
+      pan.box = box; pan.x = e.clientX; pan.y = e.clientY; pan.z = ui.zoom; pan.moved = false;
+      box.classList.add('panning');
+      document.addEventListener('mousemove', onPanMove);
+      document.addEventListener('mouseup', onPanEnd);
+    }
+    function onPanMove(e) {
+      if (!pan.box) return;
+      const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+      if (!pan.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      pan.moved = true;
+      setZoom(panBy(pan.z, dx, dy, pan.box.clientWidth, pan.box.clientHeight), false);
+    }
+    function onPanEnd() {
+      document.removeEventListener('mousemove', onPanMove);
+      document.removeEventListener('mouseup', onPanEnd);
+      if (pan.box) pan.box.classList.remove('panning');
+      // a drag that moved the picture isn't a click on the computer
+      if (pan.moved) ui.panMovedAt = Date.now();
+      pan.box = null; pan.moved = false;
+    }
+
+    function onDblClick(e) {
+      const box = zoomTarget(e.target);
+      // while you have the wheel, a double-click is two clicks on the computer: zoom with Ctrl + wheel instead
+      if (!box || wheelOn()) return;
+      e.preventDefault();
+      const b = boxPoint(box, e);
+      setZoom(toggleZoom(ui.zoom, b.px, b.py, b.w, b.h), true);
     }
 
     function renderFeed(sess) {
@@ -1880,9 +2072,9 @@
       const t = e.target;
       // a click on the screen while you have the wheel
       const box = t.closest('.uno-box');
-      if (box && wheelOn() && !t.closest('.uno-empty:not([hidden])') && !t.closest('.uno-replay:not([hidden])')) {
-        const rect = box.getBoundingClientRect();
-        const p = displayToScreen(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, ui.screenW, ui.screenH);
+      if (box && wheelOn() && !t.closest('.uno-boxbtns') && !t.closest('.uno-empty:not([hidden])') && !t.closest('.uno-replay:not([hidden])')) {
+        if (Date.now() - ui.panMovedAt < 400) return;   // the end of a drag that moved the zoomed picture
+        const p = screenPointOf(box, e);
         if (p) { ui.localClickAt = Date.now(); ripple(p.x, p.y, true); input(ui.clickMode, { x: p.x, y: p.y }); }
         return;
       }
@@ -1894,6 +2086,8 @@
       switch (what) {
         case 'close': close(); if (h.onClose) h.onClose(); break;
         case 'settings': ui.settings = !ui.settings; ui.checkText = ''; render(); if (ui.settings) refresh(); break;
+        case 'big': setBig(!ui.big); break;
+        case 'zoomReset': setZoom({ s: 1, x: 0, y: 0 }, true); break;
         case 'mode': ui.clickMode = v || 'left_click'; render(); break;
         case 'type': { const inp = $u('.uno-type'); const text = inp ? inp.value : ''; if (!text) return; input('type', { text }); inp.value = ''; inp.focus(); break; }
         case 'key': input('key', { text: v }); break;
@@ -1985,25 +2179,32 @@
 
     let wheelAt = 0;
     function onWheel(e) {
+      // Ctrl + wheel (or a trackpad pinch) zooms the big screen; it never scrolls the computer
+      const zbox = e.ctrlKey ? zoomTarget(e.target) : null;
+      if (zbox) {
+        e.preventDefault();
+        const b = boxPoint(zbox, e);
+        const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * b.h : e.deltaY;
+        setZoom(wheelZoom(ui.zoom, dy, b.px, b.py, b.w, b.h), false);
+        return;
+      }
       const box = e.target.closest && e.target.closest('.uno-box');
-      if (!box || !wheelOn()) return;
+      if (!box || !wheelOn() || e.target.closest('.uno-boxbtns')) return;
       e.preventDefault();
       if (Date.now() - wheelAt < 180) return;   // one scroll per flick, not dozens
       wheelAt = Date.now();
-      const rect = box.getBoundingClientRect();
-      const p = displayToScreen(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, ui.screenW, ui.screenH);
+      const p = screenPointOf(box, e);
       if (p) input('scroll', { x: p.x, y: p.y, direction: e.deltaY < 0 ? 'up' : 'down' });
     }
 
     function onMove(e) {
       const box = e.target.closest && e.target.closest('.uno-box');
       if (!box || !wheelOn()) { if (ui.hover) { ui.hover = null; paintChip(); } return; }
-      const rect = box.getBoundingClientRect();
-      ui.hover = displayToScreen(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, ui.screenW, ui.screenH);
+      ui.hover = screenPointOf(box, e);
       paintChip();
     }
 
-    // Esc leaves the settings, then the view; Space pauses or resumes the task (unless a text box, a button or a dialog is in front)
+    // Esc leaves the big screen, then the settings, then the view; Space pauses or resumes the task (unless a text box, a button or a dialog is in front)
     document.addEventListener('keydown', e => {
       if (!ui.open || (e.key !== 'Escape' && e.key !== ' ')) return;
       if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName || '')) return;
@@ -2015,6 +2216,7 @@
         if (b && !b.disabled) { e.preventDefault(); b.click(); }
         return;
       }
+      if (ui.big) { setBig(false); return; }
       if (ui.settings) { ui.settings = false; render(); return; }
       if (film.replay) { stopPlay(); film.replay = null; paintReplay(); renderFilm(shownSession()); return; }
       close(); if (h.onClose) h.onClose();
@@ -2033,7 +2235,8 @@
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
     computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, pauseAction, dotClass, nowLine, ago,
     addShots, shotNeighbor, shotLabel, gifFrameSize, gifFileName, makeReplayGif,
-    feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
+    feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps,
+    clampZoom, clampPan, zoomAt, wheelZoom, toggleZoom, panBy, unzoomPoint, zoomedDisplayToScreen, zoomCss, zoomLabel, keyText, tokensText, errorText, wire,
     easeOut, glideAt, tickerTiming, tickerShown, typedText, prettyKey, prettyKeys, keyChip, scrollDir, motionOf, trailGeom,
     fmtTokens, sessionTokensText, todayTokensText, runningOn, quickStartCheck, pickAgent, canRunAgain,
   };

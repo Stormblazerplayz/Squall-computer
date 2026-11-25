@@ -98,6 +98,12 @@ body.strip .uno-side { display: none; }
 .uno-ripple { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; border: 2.5px solid var(--uno-blue-2); box-shadow: 0 0 14px rgba(95, 178, 255, 0.6); animation: unoRipple 0.85s cubic-bezier(0.2, 0.7, 0.3, 1) forwards; }
 .uno-ripple.you { border-color: var(--uno-typed); box-shadow: 0 0 14px rgba(185, 167, 255, 0.6); }
 @keyframes unoRipple { from { transform: scale(0.2); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
+/* the picture, mouse, ripples and motion sit in one layer the big screen zooms (uno.js sets its transform) */
+.uno-zoom { position: absolute; inset: 0; z-index: 0; border-radius: inherit; transform-origin: 0 0; }
+.uno-zoom.ease { transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.uno-boxbtns { position: absolute; top: 8px; right: 8px; z-index: 7; display: flex; gap: 6px; }
+.uno-boxbtn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: 8px; border: 1px solid var(--uno-line); background: rgba(11, 10, 18, 0.72); color: var(--uno-text); font: 600 11.5px/1 var(--uno-font); cursor: pointer; opacity: 0.8; transition: opacity 0.15s, background 0.15s; font-variant-numeric: tabular-nums; }
+.uno-boxbtn:hover, .uno-boxbtn:focus-visible { opacity: 1; background: rgba(139, 92, 246, 0.3); }
 .uno-chip { position: absolute; right: 8px; bottom: 8px; z-index: 4; padding: 2px 8px; border-radius: 7px; font: 500 11px/1.6 var(--uno-mono); color: var(--uno-text); background: rgba(11, 10, 18, 0.78); border: 1px solid var(--uno-line); pointer-events: none; font-variant-numeric: tabular-nums; }
 .uno-empty { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 20px; text-align: center; color: var(--uno-muted); font-size: 13px; background: radial-gradient(420px 220px at 50% 40%, rgba(139, 92, 246, 0.12), transparent 70%), #08070e; }
 .uno-empty b { color: var(--uno-text); font-size: 15px; font-weight: 650; }
@@ -341,3 +347,18 @@ body.strip .uno-side { display: none; }
 .uno-prow-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; }
 .uno-prow-again { flex: none; height: 28px; margin-right: 6px; padding: 0 10px; font-size: 11.5px; }
 @media (prefers-reduced-motion: reduce) { .uno-qs-chip .uno-dot { animation: none !important; } }
+
+/* the big screen: the live screen fills the window (uno.js toggles .uno-big on the view and the body; Esc leaves).
+   The middle panel's blur would trap a fixed view inside it, so it's turned off while the big screen is up. */
+body.uno-big #center { backdrop-filter: none; -webkit-backdrop-filter: none; z-index: 45; }
+#uno-view.uno-big { position: fixed; inset: 0; z-index: 45; overflow: hidden; }
+#uno-view.uno-big .uno-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 14px 12px; }
+#uno-view.uno-big .uno-main { flex: 1; min-height: 0; gap: 8px; }
+#uno-view.uno-big .uno-stage { flex: 1 1 0; min-height: 200px; }
+#uno-view.uno-big .uno-now, #uno-view.uno-big .uno-ctrls, #uno-view.uno-big .uno-wheel { flex: none; }
+#uno-view.uno-big .uno-side-col, #uno-view.uno-big .uno-task, #uno-view.uno-big .uno-film { display: none !important; }
+#uno-view.uno-big .uno-stage:not(.wheel) .uno-box.zoomed { cursor: grab; }
+#uno-view.uno-big .uno-box.zoomed.panning { cursor: grabbing; }
+@media (prefers-reduced-motion: reduce) {
+  .uno-zoom.ease { transition: none; }
+}

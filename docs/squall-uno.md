@@ -138,6 +138,24 @@ most used colors, and after the first only the part that changed is written, whi
 `Making GIF… 4/12` while it works, then the file downloads as `squall-uno-<agent>-<yyyy-mm-dd-hhmm>.gif` (when the
 task started, local time). Pictures that aren't kept anymore are left out, and the window says how many.
 
+### Big screen
+
+The live screen's **Big screen** button (top-right of the screen) makes the live view fill the window: a class on
+the view, not the browser's full screen, so the rest of Squall stays where it was. The header, the status line and
+the buttons (Pause / Resume, Stop, Take the wheel…) stay; the feed, the filmstrip and the task box are tucked away.
+**Esc** or **Exit big screen** leaves it. In it:
+
+- **Ctrl + mouse wheel** (or a trackpad pinch) zooms from 1x to 4x around the pointer; the `2.5×` chip next to the
+  button goes back to 1x.
+- **Drag** moves around while zoomed in. The picture can't be dragged off the screen.
+- **Double-click** zooms to 2.5x on that spot, or back to 1x. While you have the wheel a double-click is two clicks on
+  the computer instead, so use Ctrl + wheel to zoom then.
+
+Clicks still only reach the computer while you have the wheel, at the computer pixel under the pointer however far
+it's zoomed; a drag that moved the picture isn't a click. The picture, mouse, ripples and motion zoom together. No new
+ops: it's the same `watch` and frame pushes as the live view. The math (`clampZoom`, `clampPan`, `zoomAt`, `wheelZoom`,
+`toggleZoom`, `panBy`, `zoomedDisplayToScreen`) is in `web/uno.js` and tested in `tests/web/uno.test.mjs`.
+
 ### Pushes to the window
 
 These use the existing `Page.Tell(name, payload)`, which posts `{"event": name, ...payload}` to the page (the same
