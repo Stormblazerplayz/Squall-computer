@@ -440,6 +440,60 @@
 
   root.SquallPhotos = { photoRoute, photoDo, photoLabel, b64Bytes, photoName, PHOTOS_MAX, PHOTO_MAX_BYTES };
 
+  // ---------------------------------------------------------------- the team's model from the phone
+  // state.models = { current: '' | model id, choices: [{ id, name, note }] } and bots[].model = the model a teammate last ran on.
+  // team.model { model } picks one model for every bot ('' = by role), the same as the model chip on the computer.
+
+  const MODEL_ID_RX = /^[a-z0-9][a-z0-9.\-]{0,60}$/;
+
+  // ops: { list() -> [{ id, name, note }], current() -> id }
+  function modelChoices(ops) {
+    if (!ops) return null;
+    const out = [], seen = new Set();
+    for (const m of ops.list() || []) {
+      if (!m || typeof m.id !== 'string' || seen.has(m.id) || (m.id && !MODEL_ID_RX.test(m.id))) continue;
+      seen.add(m.id);
+      out.push({ id: m.id, name: String(m.name || m.id).slice(0, 40), note: String(m.note || '').slice(0, 200) });
+    }
+    return out.length ? out : null;
+  }
+
+  function withModels(state, view, ops) {
+    const choices = modelChoices(ops);
+    if (!choices) return state;
+    const current = String(ops.current() || '');
+    state.models = { current: choices.some(c => c.id === current) ? current : '', choices };
+    const agents = ((view && view.agents) || []).filter(a => a && a.name);
+    const ids = botIds(agents, leadOf(view));
+    for (const a of agents) {
+      const id = ids[a.name], model = typeof a.model === 'string' ? a.model.trim() : '';
+      if (!id || !model || !MODEL_ID_RX.test(model)) continue;
+      const b = (state.bots || []).find(x => x.id === id);
+      if (b) b.model = model;
+    }
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  // null when it isn't a model action; { error } or { do: 'model', model }
+  function modelRoute(a, ops) {
+    if (!a || a.type !== 'team.model') return null;
+    const choices = modelChoices(ops);
+    if (!choices) return { error: CANT };
+    const id = a.model;
+    if (typeof id !== 'string' || !choices.some(c => c.id === id)) return { error: 'That model isn’t one Squall can use.' };
+    return { do: 'model', model: id };
+  }
+
+  function modelDo(r, ops) {
+    if (r.error) return { ok: false, error: r.error };
+    if (!ops) return { ok: false, error: CANT };
+    ops.set(r.model);
+    return String(ops.current() || '') === r.model ? { ok: true } : { ok: false, error: 'Squall couldn’t change the model.' };
+  }
+
+  root.SquallModels = { modelChoices, withModels, modelRoute, modelDo };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -714,7 +768,7 @@
     const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
     const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
     const notes = notesDesk(() => root.SquallNotesOps, () => Date.now());
-    const phoneState = () => { const v = teamView(); return withNotes(withTeam(withLater(buildState(v), v), v), notes.view()); };
+    const phoneState = () => { const v = teamView(); return withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -816,9 +870,11 @@
           const team = teamRoute(teamView(), m.body || {});
           const note = team ? null : notes.route(m.body || {});
           const photo = team || note ? null : photoRoute(view(), m.body || {});
+          const model = team || note || photo ? null : modelRoute(m.body || {}, root.SquallModelOps);
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
           else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
+          else if (model) { result = modelDo(model, root.SquallModelOps); await pushNow(); }
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }

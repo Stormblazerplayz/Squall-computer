@@ -5681,6 +5681,12 @@
     S.model = id; S.modelPicked = true; saveSoon(); renderModelChip(); closeModelMenu();
     Bridge.call('setModel', { model: id }).catch(() => {});
   }
+  // the phone's model picker (link.js withModels / modelDo)
+  window.SquallModelOps = {
+    list: () => MODELS.map(m => ({ id: m.id, name: m.name, note: m.note })),
+    current: () => S.model,
+    set: id => setModel(id),
+  };
 
   function startTimer(chat, forced) {
     const v = forced || S.workFor;
