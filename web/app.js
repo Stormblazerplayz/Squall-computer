@@ -2121,6 +2121,35 @@
     input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
     return sent;
   }
+  // Hand off from the phone (Team > a bot > Hand off): Storm asks the lead, in its chat, to take over, review or split up a bot's work,
+  // with what that bot is doing and its last message, and a note in both chats says so. Mission control then lists it (link.js,
+  // phoneHandoffs). The bot itself isn't stopped: the lead decides. Returns true, or the words for the phone when it can't
+  function phoneHandoff(from, to, job, note) {
+    const src = S.byName[from], lead = S.byName[to];
+    if (!src) return 'That teammate isn’t on the team any more.';
+    if (!lead) return 'There’s no Chief on the computer to hand it to.';
+    const dm = chatById('dm:' + to), srcDm = chatById('dm:' + from);
+    if (!dm) return 'Squall couldn’t find ' + to + '’s chat.';
+    const ask = job === 'review' ? 'Please review what ' + from + ' has done so far, and tell me what’s good and what needs fixing.'
+      : job === 'split' ? 'Please split ' + from + '’s current work up across the team, and hand out the pieces.'
+        : 'Please take over ' + from + '’s current work and finish it.';
+    const doing = src.status === 'working' && src.activity ? String(src.activity).slice(0, 200) : '';
+    let last = '';
+    if (srcDm) {
+      const said = linkMessages(srcDm).filter(m => m.who === from && m.kind === 'msg' && String(m.text || '').trim());
+      if (said.length) last = String(said[said.length - 1].text).replace(/\s+/g, ' ').trim();
+    }
+    if (last.length > 500) last = last.slice(0, 499).trimEnd() + '…';
+    const text = '(Hand off, from my phone) ' + ask
+      + (doing ? '\n\nWhat ' + from + ' is doing now: ' + doing : '')
+      + (last ? '\n\n' + from + '’s last message: “' + last + '”' : '')
+      + (note ? '\n\nMy note: ' + note : '');
+    if (!linkSend(dm, text, false)) return 'Squall couldn’t send it to ' + to + '. Is it signed in to Claude?';
+    const words = job === 'review' ? 'to review' : job === 'split' ? 'to split up' : 'to take over';
+    addMessage(dm, { who: APP, kind: 'event', text: '↪ Storm handed ' + from + '’s work to ' + to + ' ' + words + ', from the phone.', handoff: { from, to, what: (job === 'review' ? 'Review ' : job === 'split' ? 'Split up ' : 'Take over ') + from + '’s work' + (note ? ': ' + note : '') } });
+    if (srcDm) addMessage(srcDm, { who: APP, kind: 'event', text: '↪ Storm handed this work to ' + to + ' ' + words + ', from the phone.' });
+    return true;
+  }
   if (window.SquallLinkCore) window.SquallLinkCore.wire({
     S, Bridge, esc,
     phoneMessages: c => linkMessages(c),
@@ -2152,6 +2181,7 @@
     openSettings: () => openSettings(),
     inbox: { list: () => inboxLogList(), read: id => inboxMark(id, 'read'), readAll: () => inboxMark(null, 'read'), clear: id => inboxMark(id, 'cleared') },
     closeModal: () => closeModal(),
+    handoff: (from, to, job, note) => phoneHandoff(from, to, job, note),
     sfx: name => sfx(name),
     usage: () => usageForPhone(),
     setUsage: r => setUsageSettings(r),

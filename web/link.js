@@ -126,6 +126,10 @@
     }
     if (paused) state.paused = true;   // the phone's Pause all switch
     state.version = hash(JSON.stringify(state));
+    // who handed work to whom, for the phone's Mission control: a lead's tasks and Storm's Hand off. Set after the version line
+    // above, so the version is worked out again to cover them (the phone only redraws when it changes)
+    const handoffs = phoneHandoffs(view && view.chats, idOf, view && view.now);
+    if (handoffs.length) { state.handoffs = handoffs; state.version = hash(JSON.stringify(state)); }
     return state;
   }
 
@@ -371,6 +375,35 @@
     return Object.keys(ids).find(n => ids[n] === botId) || null;
   }
 
+  // ---------------------------------------------------------------- hand offs
+
+  // From each chat's own messages (raw: Squall's chat): a lead's "assigned N tasks" event ({ who, tasks: [{ to, task }] }) and
+  // Storm's Hand off from the phone ({ handoff: { from, to, what } }). Only the last 2 days, newest first, 12 at most
+  const HANDOFF_KEEP_MS = 2 * 24 * 3600 * 1000, MAX_HANDOFFS = 12;
+  function phoneHandoffs(chats, idOf, nowMs) {
+    const t0 = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
+    const out = [], seen = new Set();
+    const add = (id, from, to, what, at) => {
+      const f = idOf(from), t = idOf(to), w = String(what || '').replace(/\s+/g, ' ').trim();
+      if (!f || !t || f === t || !w || seen.has(id)) return;
+      seen.add(id);
+      out.push({ item: { id, from: f, to: t, what: w.length > 200 ? w.slice(0, 199).trimEnd() + '…' : w, at: new Date(at).toISOString() }, at });
+    };
+    for (const c of Array.isArray(chats) ? chats : []) {
+      const list = c && c.raw && Array.isArray(c.raw.messages) ? c.raw.messages : [];
+      for (const m of list) {
+        if (!m || m.kind !== 'event' || !m.id) continue;
+        const at = Date.parse(m.time || m.at);
+        if (!isFinite(at) || t0 - at > HANDOFF_KEEP_MS) continue;
+        if (m.handoff && typeof m.handoff === 'object') add(String(m.id), m.handoff.from, m.handoff.to, m.handoff.what, at);
+        else if (Array.isArray(m.tasks)) m.tasks.forEach((t, i) => { if (t) add(m.id + '-' + i, m.who, t.to, t.task, at); });
+      }
+    }
+    return out.sort((a, b) => b.at - a.at).slice(0, MAX_HANDOFFS).map(x => x.item);
+  }
+
+  const HANDOFF_JOBS = { take_over: 'take over', review: 'review', split: 'split up' };
+
   const CANT = 'Squall on the computer can’t do that yet.';
 
   // Works out what an action means for Squall: { do: 'send' | 'read' | 'clear' | 'clearAll' | 'answer' | 'group' | 'none', ... }
@@ -449,6 +482,18 @@
       case 'chief.wake': return { do: 'chiefWake' };
       case 'chief.nap': return { do: 'chiefNap' };
       case 'settings.save': return { do: 'none' };
+      case 'handoff': {
+        // Team > a bot > Hand off: { botId, job: take_over | review | split, note }. The work goes to the lead (Chief)
+        const name = nameFor(view, a.botId);
+        if (!name) return { error: 'That teammate isn’t on the team any more.' };
+        const agents = (view && view.agents) || [];
+        const lead = view && view.lead ? view.lead : (agents.find(x => x.lead) || agents[0] || {}).name;
+        if (!lead) return { error: 'There’s no Chief on the computer to hand it to.' };
+        if (name === lead) return { error: 'Chief can’t hand work to itself.' };
+        const job = String(a.job || '');
+        if (!HANDOFF_JOBS[job]) return { error: 'Pick what Chief should do with it.' };
+        return { do: 'handoff', from: name, to: lead, job, note: String(a.note || '').trim().slice(0, 1000) };
+      }
       case 'usage.settings': {
         // the phone's Plan usage screen: { throttle: true/false } and/or { limit: 10 to 100, or null for none }
         const out = { do: 'usage' };
@@ -707,6 +752,13 @@
           return { ok: true };
         }
         case 'clear': h.clear(chat); return { ok: true };
+        case 'handoff': {
+          if (!h.handoff) return { ok: false, error: CANT };
+          const res = h.handoff(r.from, r.to, r.job, r.note);
+          if (typeof res === 'string') return { ok: false, error: res };
+          await pushNow();
+          return { ok: true };
+        }
         case 'clearAll': (S.chats || []).forEach(c => h.clear(c)); return { ok: true };
         case 'teamPause': {
           if (!h.setPaused) return { ok: false, error: CANT };
