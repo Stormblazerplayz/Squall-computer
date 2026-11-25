@@ -278,3 +278,171 @@ test('the Uno tab shows every computer from the real state, and Stop everything 
     delete globalThis.SquallLinkCore;
   }
 });
+
+test('token counts read short and plain', () => {
+  assert.equal(U.fmtTokens(0), '0');
+  assert.equal(U.fmtTokens(680), '680');
+  assert.equal(U.fmtTokens(999), '999');
+  assert.equal(U.fmtTokens(999.6), '1k');          // rounds up into thousands
+  assert.equal(U.fmtTokens(1000), '1k');
+  assert.equal(U.fmtTokens(1234), '1.2k');
+  assert.equal(U.fmtTokens(5000), '5k');
+  assert.equal(U.fmtTokens(12345), '12.3k');
+  assert.equal(U.fmtTokens(99960), '100k');        // no "100.0k"
+  assert.equal(U.fmtTokens(123456), '123k');
+  assert.equal(U.fmtTokens(999600), '1M');         // no "1000k"
+  assert.equal(U.fmtTokens(1234567), '1.2M');
+  assert.equal(U.fmtTokens(250000000), '250M');
+  assert.equal(U.fmtTokens(-5), '0');
+  assert.equal(U.fmtTokens('x'), '0');
+  assert.equal(U.fmtTokens(null), '0');
+
+  assert.equal(U.sessionTokensText({ inputTokens: 12345, outputTokens: 680 }), '12.3k tokens in · 680 out');
+  assert.equal(U.sessionTokensText({ inputTokens: 900, outputTokens: 0 }), '900 tokens in · 0 out');
+  assert.equal(U.sessionTokensText({ inputTokens: 0, outputTokens: 0 }), '');   // nothing used yet: no line
+  assert.equal(U.sessionTokensText({}), '');
+  assert.equal(U.sessionTokensText(null), '');
+
+  assert.equal(U.todayTokensText({ tokensToday: { input: 120000, output: 4000 } }), 'Today: 124k tokens');
+  assert.equal(U.todayTokensText({ tokensToday: { input: 0, output: 0 } }), 'Today: no tokens yet');
+  assert.equal(U.todayTokensText({}), 'Today: no tokens yet');
+  assert.equal(U.todayTokensText(null), '');
+});
+
+test('the New task box says plainly why Start is off, and offers "Tell it" when the computer is busy', () => {
+  const ok = { hasKey: true, dockerReady: true, dockerText: 'Docker is running.' };
+  assert.deepEqual(U.quickStartCheck(ok, null, 'Chief'), { ok: true, kind: '', why: '', sessionId: null });
+  assert.deepEqual(U.quickStartCheck(null, null, 'Chief').ok, true);   // not known yet: the host decides
+  const key = U.quickStartCheck({ hasKey: false, dockerReady: true }, null, 'Chief');
+  assert.deepEqual([key.ok, key.kind], [false, 'key']);
+  assert.match(key.why, /API key/);
+  const dock = U.quickStartCheck({ hasKey: true, dockerReady: false, dockerText: 'Start Docker Desktop, then try again.' }, null, 'Chief');
+  assert.deepEqual([dock.ok, dock.kind, dock.why], [false, 'docker', 'Start Docker Desktop, then try again.']);
+  assert.match(U.quickStartCheck({ hasKey: true, dockerReady: false }, null, 'Chief').why, /Docker/);
+  const busy = U.quickStartCheck(ok, { id: 'uno-1', state: 'running' }, 'Quill');
+  assert.deepEqual([busy.ok, busy.kind, busy.sessionId], [false, 'busy', 'uno-1']);
+  assert.match(busy.why, /^Quill’s computer is busy/);
+  assert.equal(U.quickStartCheck(ok, { id: 'uno-1', state: 'you' }, 'Quill').kind, 'busy');
+  assert.equal(U.quickStartCheck(ok, { id: 'uno-1', state: 'done' }, 'Quill').ok, true);   // an ended task doesn't block
+  // busy wins over the setup problems, because "Tell it" still works
+  assert.equal(U.quickStartCheck({ hasKey: false }, { id: 'uno-1', state: 'running' }, 'Quill').kind, 'busy');
+
+  const list = [{ agentId: 'quill', agentName: 'Quill' }, { agentId: 'chief', agentName: 'Nova' }];
+  assert.equal(U.pickAgent(list, null).agentId, 'chief');      // Chief by default
+  assert.equal(U.pickAgent(list, 'quill').agentId, 'quill');
+  assert.equal(U.pickAgent(list, 'gone').agentId, 'chief');
+  assert.equal(U.pickAgent([{ agentId: 'quill' }], null).agentId, 'quill');
+  assert.equal(U.pickAgent([], 'chief'), null);
+
+  assert.equal(U.canRunAgain({ state: 'done', task: 'Weather' }), true);
+  assert.equal(U.canRunAgain({ state: 'stopped', task: 'Weather' }), true);
+  assert.equal(U.canRunAgain({ state: 'error', task: 'Weather' }), true);
+  assert.equal(U.canRunAgain({ state: 'running', task: 'Weather' }), false);
+  assert.equal(U.canRunAgain({ state: 'done', task: '  ' }), false);
+  assert.equal(U.canRunAgain(null), false);
+
+  const st = U.newStore();
+  U.mergeState(st, sampleState(), true);
+  assert.equal(U.runningOn(st, 'chief').id, 'uno-b');
+  assert.equal(U.runningOn(st, 'scout'), null);
+  st.sessions[0].state = 'done';
+  assert.equal(U.runningOn(st, 'chief'), null);
+});
+
+test('the Uno tab starts a task, tells a busy one, runs an old one again, and shows real tokens', async () => {
+  const listeners = {};
+  globalThis.document = { hidden: false, addEventListener: (n, f) => { (listeners[n] = listeners[n] || []).push(f); }, getElementById: () => null, querySelector: () => null };
+  const realInterval = globalThis.setInterval;
+  globalThis.setInterval = (f, ms) => { const t = realInterval(f, ms); t.unref(); return t; };
+  const calls = [];
+  let startAnswer = { ok: true, sessionId: 'uno-cccccccccccc', computerId: 'pc-chief' };
+  const state = {
+    ok: true, lastSeq: 0, events: [],
+    settings: { hasKey: true, dockerReady: true, dockerText: 'Docker is running.', maxSteps: 80, tokensToday: { input: 120000, output: 4000 } },
+    computers: [{ id: 'pc-chief', agentId: 'chief', agentName: 'Nova', state: 'on', sessionId: null, frameSeq: 1 },
+      { id: 'pc-quill', agentId: 'quill', agentName: 'Quill', state: 'on', sessionId: 'uno-qqqqqqqqqqqq', frameSeq: 2 }],
+    sessions: [{ id: 'uno-qqqqqqqqqqqq', computerId: 'pc-quill', agentId: 'quill', agentName: 'Quill', task: 'Sort the files', state: 'running', startedAt: T + 5, steps: 2, inputTokens: 5000, outputTokens: 90 },
+      { id: 'uno-aaaaaaaaaaaa', computerId: 'pc-chief', agentId: 'chief', agentName: 'Nova', task: 'Find the weather in Paris', state: 'done', startedAt: T, steps: 9, inputTokens: 12345, outputTokens: 680 }],
+  };
+  const Bridge = { host: true, on: () => { }, call: async (name, body) => {
+    calls.push(body);
+    if (body.op === 'start') return startAnswer;
+    if (body.op === 'message' || body.op === 'watch') return { ok: true };
+    return state;
+  } };
+  globalThis.SquallLinkCore = L;
+  const fire = (name, ev) => (listeners[name] || []).forEach(f => f(ev));
+  const button = (what, attrs) => ({ disabled: false, getAttribute: n => (n === 'data-uno-pane' ? what : (attrs || {})[n] || null) });
+  const press = (what, attrs) => { const b = button(what, attrs); fire('click', { target: { closest: sel => (sel === '[data-uno-pane]' ? b : null) } }); };
+  const type = text => fire('input', { target: { classList: { contains: c => c === 'uno-qs-in' }, value: text } });
+  const tick = () => new Promise(r => setTimeout(r, 20));
+  try {
+    const ui = U.wire({ S: { agents: [{ name: 'Nova', color: '#F5B83D', lead: true }, { name: 'Quill', color: '#3D9BE9' }], lead: { name: 'Nova' } }, Bridge, renderPaneSoon: () => { } });
+    await tick();
+    let html = ui.paneHTML();
+    // the header, the box, the chips (Chief first and on), the busy marker, the tokens, Run again
+    assert.match(html, /Today: 124k tokens/);
+    assert.match(html, /placeholder="What should it do\?"/);
+    assert.ok(html.indexOf('data-k="uno-qs"') < html.indexOf('data-k="uno-sec-pcs"'));   // the box is at the top
+    assert.match(html, /uno-qs-chip on" data-k="uno-qs-chip:chief"/);
+    assert.ok(html.indexOf('uno-qs-chip:chief') < html.indexOf('uno-qs-chip:quill'));
+    assert.match(html, /uno-qs-chip busy" data-k="uno-qs-chip:quill"/);
+    assert.match(html, /12\.3k tokens in · 680 out/);
+    assert.match(html, /5k tokens in · 90 out/);
+    assert.match(html, /data-uno-pane="again" data-sid="uno-aaaaaaaaaaaa"/);
+    assert.ok(!/data-sid="uno-qqqqqqqqqqqq"/.test(html));   // a running task has no Run again
+    assert.ok(!/demo|sample|lorem/i.test(html));
+
+    // an empty box doesn't start anything
+    press('qsStart'); await tick();
+    assert.ok(!calls.some(c => c.op === 'start'));
+    assert.match(ui.paneHTML(), /Write what it should do first/);
+
+    // a failed start keeps the text and shows the host's reason
+    type('Check my email');
+    startAnswer = { ok: false, error: 'Docker isn’t running.' };
+    press('qsStart'); await tick();
+    html = ui.paneHTML();
+    assert.match(html, /Docker isn’t running\./);
+    assert.match(html, /value="Check my email"/);
+
+    // then it starts on Chief's computer and opens the live view
+    startAnswer = { ok: true, sessionId: 'uno-cccccccccccc', computerId: 'pc-chief' };
+    press('qsStart'); await tick();
+    const st1 = calls.filter(c => c.op === 'start').pop();
+    assert.deepEqual([st1.agentId, st1.agentName, st1.task], ['chief', 'Nova', 'Check my email']);
+    assert.equal(ui.isOpen(), true);
+    assert.match(ui.paneHTML(), /value=""/);
+
+    // Quill is busy: Start is off with a plain reason, "Tell it instead" sends a message to its running task
+    press('pick', { 'data-agent': 'quill' }); await tick();
+    html = ui.paneHTML();
+    assert.match(html, /data-uno-pane="qsStart" disabled/);
+    assert.match(html, /Quill’s computer is busy/);
+    assert.match(html, /Tell it instead/);
+    type('Put them in folders by year');
+    press('qsTell'); await tick();
+    const msg = calls.filter(c => c.op === 'message').pop();
+    assert.deepEqual([msg.sessionId, msg.text], ['uno-qqqqqqqqqqqq', 'Put them in folders by year']);
+
+    // Run again starts the same task on the same computer
+    const before = calls.filter(c => c.op === 'start').length;
+    press('again', { 'data-sid': 'uno-aaaaaaaaaaaa' }); await tick();
+    const again = calls.filter(c => c.op === 'start');
+    assert.equal(again.length, before + 1);
+    assert.deepEqual([again[again.length - 1].agentId, again[again.length - 1].task], ['chief', 'Find the weather in Paris']);
+
+    // no key: Start is off and says why
+    state.settings = Object.assign({}, state.settings, { hasKey: false });
+    await ui.refresh(); await tick();
+    press('pick', { 'data-agent': 'chief' }); await tick();
+    html = ui.paneHTML();
+    assert.match(html, /data-uno-pane="qsStart" disabled/);
+    assert.match(html, /needs an Anthropic API key first\. Add it in Settings/);
+  } finally {
+    globalThis.setInterval = realInterval;
+    delete globalThis.document;
+    delete globalThis.SquallUnoUI;
+    delete globalThis.SquallLinkCore;
+  }
+});

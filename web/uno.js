@@ -284,6 +284,71 @@
     return fmtNum(i) + ' in · ' + fmtNum(o) + ' out today';
   }
 
+  // ---------------------------------------------------------------- tokens (real counts from the host)
+  //
+  // No dollar price here on purpose: a session's inputTokens adds plain input, cache writes and cache reads together
+  // (UnoHub.Run.cs), and those cost different amounts, so any price worked out from the total would be wrong.
+
+  // A token count, short: 680, 1.2k, 12.3k, 123k, 1.2M
+  function fmtTokens(n) {
+    const v = Math.max(0, Math.round(+n || 0));
+    if (v < 1000) return String(v);
+    const one = x => (Number.isInteger(x) ? String(x) : x.toFixed(1));
+    const k1 = Math.round(v / 100) / 10;
+    if (k1 < 100) return one(k1) + 'k';
+    const k0 = Math.round(v / 1000);
+    if (k0 < 1000) return k0 + 'k';
+    const m1 = Math.round(v / 100000) / 10;
+    if (m1 < 100) return one(m1) + 'M';
+    return Math.round(v / 1000000) + 'M';
+  }
+
+  // "12.3k tokens in · 680 out" for one session, or '' before it has used any
+  function sessionTokensText(s) {
+    const i = Math.max(0, +(s && s.inputTokens) || 0), o = Math.max(0, +(s && s.outputTokens) || 0);
+    if (!i && !o) return '';
+    return fmtTokens(i) + ' tokens in · ' + fmtTokens(o) + ' out';
+  }
+
+  // "Today: 124k tokens" for the Uno tab's header, or '' before the settings came
+  function todayTokensText(st) {
+    if (!st || typeof st !== 'object') return '';
+    const t = st.tokensToday || {};
+    const total = Math.max(0, +t.input || 0) + Math.max(0, +t.output || 0);
+    return total ? 'Today: ' + fmtTokens(total) + ' tokens' : 'Today: no tokens yet';
+  }
+
+  // ---------------------------------------------------------------- starting a task from the Uno tab
+
+  // The session running on an agent's computer right now, or null
+  function runningOn(store, agentId) {
+    const comp = computerOf(store, agentId);
+    const cid = comp ? comp.id : computerIdFor(agentId);
+    if (comp && comp.sessionId) { const s = store.sessions.find(x => x.id === comp.sessionId); if (isRunning(s)) return s; }
+    return store.sessions.find(s => (s.computerId === cid || (!s.computerId && s.agentId === agentId)) && isRunning(s)) || null;
+  }
+
+  // Can a new task start on this agent's computer? { ok, kind: '' | 'busy' | 'key' | 'docker', why, sessionId }
+  // st: the settings (null = not known yet: let the host decide); running: the session on that computer now.
+  function quickStartCheck(st, running, agentName) {
+    const who = String(agentName || '').trim() || 'This agent';
+    if (isRunning(running)) return { ok: false, kind: 'busy', why: who + '’s computer is busy with a task. Tell it something instead, or stop it first.', sessionId: running.id || null };
+    if (st && st.hasKey === false) return { ok: false, kind: 'key', why: 'Squall Uno needs an Anthropic API key first. Add it in Settings.', sessionId: null };
+    if (st && st.dockerReady === false) return { ok: false, kind: 'docker', why: String(st.dockerText || '').trim() || 'Docker Desktop isn’t running on this PC yet.', sessionId: null };
+    return { ok: true, kind: '', why: '', sessionId: null };
+  }
+
+  // The agent the picker has on: the one picked if it's still there, else Chief, else the first.
+  function pickAgent(list, picked) {
+    const l = Array.isArray(list) ? list : [];
+    return l.find(a => a.agentId === picked) || l.find(a => a.agentId === CHIEF) || l[0] || null;
+  }
+
+  // "Run again" is for tasks that ended (done, stopped or error) and had words
+  function canRunAgain(s) {
+    return !!s && ['done', 'stopped', 'error'].indexOf(s.state) >= 0 && !!String(s.task || '').trim();
+  }
+
   // A failed op as a plain sentence, or '' when it worked
   function errorText(resOrErr) {
     if (!resOrErr) return 'Squall didn’t answer.';
@@ -448,13 +513,64 @@
 
     // ---------------- the Uno tab in the right pane: every computer at a glance ----------------
 
-    const pane = { stopping: false, err: '' };
-    function paneHTML() {
-      const head = n => '<div class="uno-pane-head" data-k="uno-pane-head"><span class="uno-side-bolt">' + ICONS.bolt + '</span><b>Squall Uno</b>' +
+    // pane: the Uno tab's own state. text/agentId: the "New task" box (kept here so a redraw never loses what you typed);
+    // qsErr: why the last Start or "Tell it" didn't work (stays until you try again or change the text).
+    const pane = { stopping: false, err: '', text: '', agentId: null, starting: false, telling: false, qsErr: '', again: {} };
+
+    function paneHead(n) {
+      const st = store.settings;
+      const today = available && ui.loaded ? todayTokensText(st) : '';
+      return '<div class="uno-pane-head" data-k="uno-pane-head"><span class="uno-side-bolt">' + ICONS.bolt + '</span><b>Squall Uno</b>' +
         (n ? '<span class="uno-side-live"><i></i>' + n + ' live</span>' : '') +
+        (today ? '<span class="uno-pane-today" title="' + esc('Tokens Squall Uno used today: ' + tokensText(st)) + '">' + esc(today) + '</span>' : '') +
         (available ? '<button class="uno-pane-gear" data-uno-pane="settings" title="Squall Uno settings: API key, steps, Docker">Settings</button>' : '') + '</div>';
-      if (!available) return '<div class="uno-pane" data-k="uno-pane">' + head(0) + '<div class="uno-pane-note" data-k="uno-pane-note">Squall Uno needs the Squall app on this PC.</div></div>';
-      if (!ui.loaded) return '<div class="uno-pane" data-k="uno-pane">' + head(0) + '<div class="uno-pane-note" data-k="uno-pane-note">' + esc(ui.missing || 'Asking Squall Uno…') + '</div></div>';
+    }
+
+    // The "New task" box at the top of the Uno tab: what to do, whose computer, Start.
+    // It always sits right under the header and the text box comes first in it, so a redraw keeps the box you type in.
+    function quickStartHTML(list) {
+      const a = pickAgent(list, pane.agentId);
+      const running = a ? runningOn(store, a.agentId) : null;
+      const chk = a ? quickStartCheck(store.settings, running, a.agentName) : { ok: false, kind: 'none', why: 'Squall has no agents to give a task to yet.' };
+      const chips = list.map(x => {
+        const busy = runningOn(store, x.agentId);
+        const on = a && x.agentId === a.agentId;
+        return '<button class="uno-qs-chip' + (on ? ' on' : '') + (busy ? ' busy' : '') + '" data-k="uno-qs-chip:' + esc(x.agentId) + '" data-uno-pane="pick" data-agent="' + esc(x.agentId) + '" role="radio" aria-checked="' + (on ? 'true' : 'false') + '"' +
+          ' title="' + esc(x.agentName + '’s computer' + (busy ? ' · busy: ' + (busy.task || 'a task') : ' · free')) + '">' +
+          iconFor(x) + '<span>' + esc(x.agentName) + '</span>' + (busy ? '<i class="uno-dot ' + (busy.state === 'starting' ? 'starting' : 'live') + '"></i><em>busy</em>' : '') + '</button>';
+      }).join('');
+      const starting = pane.starting, telling = pane.telling;
+      let btns = '<button class="uno-btn primary" data-k="uno-qs-start" data-uno-pane="qsStart"' + (!chk.ok || starting ? ' disabled' : '') + (chk.why ? ' title="' + esc(chk.why) + '"' : '') + '>' + (starting ? 'Starting…' : 'Start') + '</button>';
+      if (chk.kind === 'busy') btns += '<button class="uno-btn" data-k="uno-qs-tell" data-uno-pane="qsTell"' + (telling ? ' disabled' : '') + ' title="Sends this to the task that’s running, before its next step">' + (telling ? 'Sending…' : 'Tell it instead') + '</button>';
+      if (chk.kind === 'key') btns += '<button class="uno-btn quiet" data-k="uno-qs-key" data-uno-pane="settings">Open Settings</button>';
+      return '<div class="uno-qs" data-k="uno-qs">' +
+        '<input class="uno-in uno-qs-in" data-k="uno-qs-in" type="text" placeholder="What should it do?" aria-label="What should it do?" maxlength="4000" spellcheck="true" autocomplete="off" value="' + esc(pane.text) + '">' +
+        '<div class="uno-qs-chips" data-k="uno-qs-chips" role="radiogroup" aria-label="Whose computer">' + chips + '</div>' +
+        '<div class="uno-qs-row" data-k="uno-qs-row">' + btns + '</div>' +
+        (chk.why ? '<div class="uno-qs-why" data-k="uno-qs-why">' + esc(chk.why) + '</div>' : '') +
+        (pane.qsErr ? '<div class="uno-pane-err" data-k="uno-qs-err">' + esc(pane.qsErr) + '</div>' : '') +
+        '</div>';
+    }
+
+    // One "Recent tasks" row: open the computer, the tokens it used, and Run again once it ended
+    function recentRowHTML(r, now) {
+      const toks = sessionTokensText(r);
+      let again = '';
+      if (canRunAgain(r)) {
+        const chk = quickStartCheck(store.settings, runningOn(store, r.agentId), r.agentName);
+        const busy = !!pane.again[r.id];
+        again = '<button class="uno-btn uno-prow-again" data-k="uno-again:' + esc(r.id) + '" data-uno-pane="again" data-sid="' + esc(r.id) + '"' + (!chk.ok || busy ? ' disabled' : '') +
+          ' title="' + esc(chk.ok ? 'Starts “' + clip(r.task, 60) + '” again on ' + (r.agentName || 'the same') + '’s computer' : chk.why) + '">' + (busy ? 'Starting…' : 'Run again') + '</button>';
+      }
+      return '<div class="uno-prow s-' + esc(r.state) + '" data-k="uno-prow:' + esc(r.id) + '">' +
+        '<button class="uno-prow-open" data-uno-open="' + esc(r.agentId) + '" title="Open ' + esc(r.agentName || 'that') + '’s computer">' +
+        '<span class="uno-prow-task">' + esc(r.task || 'A task') + '</span><span class="uno-prow-meta">' + esc((r.agentName || '') + ' · ' + sessionLabel(r) + (r.startedAt ? ' · ' + ago(+r.startedAt, now) : '')) + '</span>' +
+        (toks ? '<span class="uno-prow-tok">' + esc(toks) + '</span>' : '') + '</button>' + again + '</div>';
+    }
+
+    function paneHTML() {
+      if (!available) return '<div class="uno-pane" data-k="uno-pane">' + paneHead(0) + '<div class="uno-pane-note" data-k="uno-pane-note">Squall Uno needs the Squall app on this PC.</div></div>';
+      if (!ui.loaded) return '<div class="uno-pane" data-k="uno-pane">' + paneHead(0) + '<div class="uno-pane-note" data-k="uno-pane-note">' + esc(ui.missing || 'Asking Squall Uno…') + '</div></div>';
       const list = agents(), now = Date.now();
       let live = 0;
       const cards = list.map(a => {
@@ -476,16 +592,36 @@
         ? '<button class="uno-btn danger uno-pane-stop" data-k="uno-pane-stop" data-uno-pane="stopAll"' + (pane.stopping ? ' disabled' : '') + ' title="Stops every Squall Uno task on every computer">' + (pane.stopping ? 'Stopping everything…' : 'Stop everything') + '</button>' : '';
       const recent = store.sessions.slice().sort((x, y) => (+y.startedAt || 0) - (+x.startedAt || 0)).slice(0, 8);
       const rec = recent.length
-        ? recent.map(r => '<button class="uno-prow s-' + esc(r.state) + '" data-k="uno-prow:' + esc(r.id) + '" data-uno-open="' + esc(r.agentId) + '" title="Open ' + esc(r.agentName || 'that') + '’s computer">' +
-          '<span class="uno-prow-task">' + esc(r.task || 'A task') + '</span><span class="uno-prow-meta">' + esc((r.agentName || '') + ' · ' + sessionLabel(r) + (r.startedAt ? ' · ' + ago(+r.startedAt, now) : '')) + '</span></button>').join('')
-        : '<div class="uno-pane-note" data-k="uno-rec-none">No tasks yet. Click a computer and tell Squall Uno what to do.</div>';
-      return '<div class="uno-pane" data-k="uno-pane">' + head(live) +
+        ? recent.map(r => recentRowHTML(r, now)).join('')
+        : '<div class="uno-pane-note" data-k="uno-rec-none">No tasks yet. Write one above and press Start.</div>';
+      return '<div class="uno-pane" data-k="uno-pane">' + paneHead(live) + quickStartHTML(list) +
         (pane.err ? '<div class="uno-pane-err" data-k="uno-pane-err">' + esc(pane.err) + '</div>' : '') + hints + stopAll +
         '<div class="uno-pane-sec" data-k="uno-sec-pcs">Computers</div><div class="uno-pcards" data-k="uno-pcards">' + cards + '</div>' +
         '<div class="uno-pane-sec" data-k="uno-sec-rec">Recent tasks</div><div class="uno-prows" data-k="uno-prows">' + rec + '</div></div>';
     }
 
-    async function paneDo(what) {
+    // Starts a task from the Uno tab, then opens that agent's live view so you watch it right away.
+    // Gives back the plain error, or '' when it started.
+    async function startFromPane(agentId, agentName, task) {
+      const res = await op('start', { agentId, agentName, task });
+      if (!res.ok) return res.error || 'That didn’t start.';
+      open(agentId);
+      ui.viewSession = null; ui.wheelLocal = false;
+      if (res.computerId) { ui.watching = null; setWatch(res.computerId); }
+      refresh();
+      return '';
+    }
+
+    function qsText() {
+      // what's in the box right now (the page's own copy wins over the last one we saw)
+      const el = document.querySelector && document.querySelector('.uno-qs-in');
+      if (el && typeof el.value === 'string') pane.text = el.value;
+      return String(pane.text || '').trim();
+    }
+
+    function qsFocus() { const el = document.querySelector && document.querySelector('.uno-qs-in'); if (el && el.focus) el.focus(); }
+
+    async function paneDo(what, el) {
       if (what === 'settings') {
         const first = agents()[0];
         open(ui.agentId || (first ? first.agentId : CHIEF));
@@ -499,6 +635,54 @@
         pane.err = res.ok ? (res.stopped === 0 ? 'Nothing was running.' : '') : res.error;
         if (pane.err) setTimeout(() => { pane.err = ''; paneChanged(); }, 6000);
         refresh();
+        return;
+      }
+      if (what === 'pick') {
+        const id = el && el.getAttribute ? el.getAttribute('data-agent') : null;
+        if (id && id !== pane.agentId) { pane.agentId = id; pane.qsErr = ''; paneChanged(); }
+        qsFocus();
+        return;
+      }
+      if (what === 'qsStart' || what === 'qsTell') {
+        if (pane.starting || pane.telling) return;
+        const a = pickAgent(agents(), pane.agentId);
+        const task = qsText();
+        if (!a) { pane.qsErr = 'Squall has no agents to give a task to yet.'; paneChanged(); return; }
+        if (!task) { pane.qsErr = 'Write what it should do first.'; paneChanged(); qsFocus(); return; }
+        const running = runningOn(store, a.agentId);
+        const chk = quickStartCheck(store.settings, running, a.agentName);
+        if (what === 'qsTell') {
+          if (chk.kind !== 'busy' || !chk.sessionId) { pane.qsErr = a.agentName + '’s computer isn’t running a task right now. Press Start instead.'; paneChanged(); return; }
+          pane.telling = true; pane.qsErr = ''; paneChanged();
+          const res = await op('message', { sessionId: chk.sessionId, text: task });
+          pane.telling = false;
+          if (!res.ok) pane.qsErr = res.error;
+          else { pane.text = ''; open(a.agentId); refresh(); }
+          paneChanged();
+          return;
+        }
+        if (!chk.ok) { pane.qsErr = chk.why; paneChanged(); return; }
+        pane.starting = true; pane.qsErr = ''; paneChanged();
+        const err = await startFromPane(a.agentId, a.agentName, task);
+        pane.starting = false;
+        if (err) pane.qsErr = err;   // the text stays so you can try again
+        else pane.text = '';
+        paneChanged();
+        return;
+      }
+      if (what === 'again') {
+        const sid = el && el.getAttribute ? el.getAttribute('data-sid') : null;
+        const s = sid ? store.sessions.find(x => x.id === sid) : null;
+        if (!s || !canRunAgain(s) || pane.again[sid]) return;
+        const known = agents().find(x => x.agentId === s.agentId);
+        const name = (known && known.agentName) || s.agentName || s.agentId;
+        const chk = quickStartCheck(store.settings, runningOn(store, s.agentId), name);
+        if (!chk.ok) { pane.err = chk.why; paneChanged(); setTimeout(() => { pane.err = ''; paneChanged(); }, 6000); return; }
+        pane.again[sid] = true; pane.err = ''; paneChanged();
+        const err = await startFromPane(s.agentId, name, String(s.task).trim());
+        delete pane.again[sid];
+        if (err) { pane.err = err; setTimeout(() => { pane.err = ''; paneChanged(); }, 9000); }
+        paneChanged();
       }
     }
     function paneChanged() { if (h.renderPaneSoon) h.renderPaneSoon(); }
@@ -507,9 +691,27 @@
       const t = e.target && e.target.closest ? e.target : null;
       if (!t) return;
       const pd = t.closest('[data-uno-pane]');
-      if (pd) { paneDo(pd.getAttribute('data-uno-pane')); return; }
+      if (pd) { if (!pd.disabled) paneDo(pd.getAttribute('data-uno-pane'), pd); return; }
       const row = t.closest('[data-uno-open]');
       if (row) { open(row.getAttribute('data-uno-open')); }
+    });
+    // the "New task" box: remember what's typed (redraws keep it), Enter presses Start (or "Tell it instead" when busy)
+    document.addEventListener('input', e => {
+      const t = e.target;
+      if (!t || !t.classList || !t.classList.contains('uno-qs-in')) return;
+      pane.text = t.value;
+      if (pane.qsErr) { pane.qsErr = ''; paneChanged(); }
+    });
+    document.addEventListener('keydown', e => {
+      const t = e.target;
+      if (!t || !t.classList || !t.classList.contains('uno-qs-in') || e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      const box = t.closest ? t.closest('.uno-qs') : null;
+      const start = box && box.querySelector('[data-uno-pane="qsStart"]');
+      const tell = box && box.querySelector('[data-uno-pane="qsTell"]');
+      if (start && !start.disabled) paneDo('qsStart', start);
+      else if (tell && !tell.disabled) paneDo('qsTell', tell);
+      else paneDo('qsStart', start);
     });
 
     // ---------------- the view ----------------
@@ -658,7 +860,7 @@
         '<button class="uno-back" data-u="close" title="Back to the chat">' + svg('back', 16) + '</button>' +
         iconFor(a, true) +
         '<div class="uno-head-t"><div class="uno-title">' + esc(title) + (st.live && available && ui.loaded ? '<span class="uno-livepill"><i></i>LIVE</span>' : '') + '</div>' +
-        '<div class="uno-sub s-' + esc(available && ui.loaded ? st.key : 'off') + '">' + esc(sub) + '</div></div>' +
+        '<div class="uno-sub s-' + esc(available && ui.loaded ? st.key : 'off') + '">' + esc(sub) + '</div>' + headTokensHTML(sess) + '</div>' +
         (available ? '<button class="uno-gear' + (ui.settings ? ' on' : '') + '" data-u="settings" title="Squall Uno settings">' + svg('gear', 16) + '</button>' : ''));
 
       // the flash line (errors from ops)
@@ -839,7 +1041,17 @@
       const t = Date.now();
       setHTML('.uno-recent', list.map(s => '<button class="uno-sess' + (sess && sess.id === s.id ? ' on' : '') + ' s-' + esc(s.state || '') + '" data-u="session" data-uv="' + esc(s.id) + '">' +
         '<span class="uno-sess-t">' + esc(clip(s.task || '(no task)', 80)) + '</span>' +
-        '<span class="uno-sess-m"><i></i>' + esc(sessionLabel(s)) + (s.startedAt ? ' · ' + esc(ago(s.startedAt, t)) : '') + (cur && cur.id === s.id && isRunning(s) ? ' · now' : '') + '</span></button>').join(''));
+        '<span class="uno-sess-m"><i></i>' + esc(sessionLabel(s)) + (s.startedAt ? ' · ' + esc(ago(s.startedAt, t)) : '') + (cur && cur.id === s.id && isRunning(s) ? ' · now' : '') + '</span>' +
+        sessionTokensHTML(s, 'uno-sess-tok') + '</button>').join(''));
+    }
+
+    // The small "12.3k tokens in · 680 out" line: under the live view's title, and in each session row
+    function sessionTokensHTML(s, cls) {
+      const t = sessionTokensText(s);
+      return t ? '<span class="' + cls + '" title="Tokens this task used">' + esc(t) + '</span>' : '';
+    }
+    function headTokensHTML(sess) {
+      return available && ui.loaded && sess ? sessionTokensHTML(sess, 'uno-head-tok') : '';
     }
 
     function renderSettings() {
@@ -1030,6 +1242,7 @@
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
     computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, nowLine, ago,
     feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
+    fmtTokens, sessionTokensText, todayTokensText, runningOn, quickStartCheck, pickAgent, canRunAgain,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SquallUno = api;

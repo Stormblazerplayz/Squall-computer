@@ -213,8 +213,35 @@ body.strip .uno-side { display: none; }
 .uno-pcard-nm { font: 650 13px/1.2 var(--uno-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .uno-pcard-st { font: 500 11.5px/1.2 var(--uno-font); color: var(--uno-muted); }
 .uno-pcard-now { font: 500 11px/1.3 var(--uno-mono); color: var(--uno-blue-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.uno-prow { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 7px 10px; border-radius: 10px; border: 1px solid transparent; background: transparent; color: var(--uno-text); text-align: left; }
+.uno-prow { display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid transparent; background: transparent; color: var(--uno-text); }
 .uno-prow:hover { background: var(--uno-card); border-color: var(--uno-line); }
 .uno-prow-task { font: 600 12.5px/1.25 var(--uno-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .uno-prow-meta { font-size: 11px; color: var(--uno-muted); }
 .uno-prow.s-running .uno-prow-meta, .uno-prow.s-starting .uno-prow-meta { color: #ffb3ba; }
+
+/* ---------- tokens: real counts from the host ---------- */
+.uno-pane-today { margin-left: auto; font: 500 11px/1.2 var(--uno-mono); color: var(--uno-muted); white-space: nowrap; }
+.uno-pane-today + .uno-pane-gear { margin-left: 8px; }
+.uno-head-tok { display: block; margin-top: 2px; font: 500 11px/1.3 var(--uno-mono); color: var(--uno-wait); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.uno-sess-tok, .uno-prow-tok { font: 500 10.5px/1.3 var(--uno-mono); color: var(--uno-wait); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- the Uno tab's "New task" box ---------- */
+.uno-qs { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 12px; border: 1px solid rgba(139, 92, 246, 0.35); background: rgba(139, 92, 246, 0.07); }
+.uno-qs-in { min-width: 0; width: 100%; box-sizing: border-box; flex: none; }
+.uno-qs-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.uno-qs-chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px 0 4px; border-radius: 999px; border: 1px solid var(--uno-line); background: rgba(255, 255, 255, 0.04); color: var(--uno-muted); font: 600 12px/1 var(--uno-font); transition: background 0.15s, border-color 0.15s, color 0.15s; }
+.uno-qs-chip:hover { color: var(--uno-text); background: rgba(255, 255, 255, 0.08); }
+.uno-qs-chip.on { color: var(--uno-text); border-color: rgba(139, 92, 246, 0.75); background: rgba(139, 92, 246, 0.2); }
+.uno-qs-chip .uno-ic { width: 22px; height: 22px; border-radius: 50%; font-size: 10.5px; }
+.uno-qs-chip .uno-ic svg { width: 12px; height: 12px; }
+.uno-qs-chip .uno-dot { width: 7px; height: 7px; }
+.uno-qs-chip em { font: 700 10px/1 var(--uno-font); font-style: normal; letter-spacing: 0.06em; text-transform: uppercase; color: #ffb3ba; }
+.uno-qs-chip:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.6); }
+.uno-qs-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.uno-qs-row .uno-btn.primary { min-width: 84px; justify-content: center; }
+.uno-qs-why { font-size: 11.5px; color: #f7d49a; }
+
+/* recent rows: the row opens the computer, Run again sits beside it */
+.uno-prow-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; }
+.uno-prow-again { flex: none; height: 28px; margin-right: 6px; padding: 0 10px; font-size: 11.5px; }
+@media (prefers-reduced-motion: reduce) { .uno-qs-chip .uno-dot { animation: none !important; } }
