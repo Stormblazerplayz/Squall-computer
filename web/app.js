@@ -5687,6 +5687,27 @@
     current: () => S.model,
     set: id => setModel(id),
   };
+  // the phone's work timers (link.js withTimers / timerDo): the same as the timer dial's Done, in any chat
+  window.SquallTimerOps = {
+    list: () => Object.keys(S.timers).filter(id => S.timers[id]).map(id => {
+      const t = S.timers[id];
+      return { chatId: id, until: t.until === Infinity ? null : t.until, mins: t.mins, startedAt: t.startedAt, paused: !!t.paused };
+    }),
+    workFor: () => S.workFor,
+    start: (c, v) => {
+      startTimer(c, v);
+      const t = S.timers[c.id];
+      if (!t) return false;
+      const mi = mirrorFor(c);
+      const busy = mi ? mirrorBusy(mi) : !!S.flows[c.id];
+      const pendingNow = !!mi && (mi.pending || []).some(p => Date.now() - p.at < 60000);
+      addMessage(c, { who: APP, kind: 'event', text: '⏱ Work timer started from the phone: ' + (v === 'inf' ? 'Continuous' : v >= 60 && v % 60 === 0 ? v / 60 + ' h' : v + ' min') + '.' });
+      if (!busy && !pendingNow) timerTick(c.id);   // idle now: the first nudge goes out right away
+      else t.busySeen = true;                       // busy now: the watch nudges when it finishes
+      return true;
+    },
+    stop: c => { if (!S.timers[c.id]) return false; stopTimer(c.id); return true; },
+  };
 
   function startTimer(chat, forced) {
     const v = forced || S.workFor;

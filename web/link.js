@@ -494,6 +494,64 @@
 
   root.SquallModels = { modelChoices, withModels, modelRoute, modelDo };
 
+  // ---------------------------------------------------------------- work timers from the phone
+  // state.timers = [{ chatId, minutes (null = continuous), startedAt, until (null = continuous), paused }] and
+  // state.workFor = 'off' | 'inf' | minutes (the computer's dial). timer.start { chatId, minutes: 10..600 or 'inf' } starts a
+  // timer in that chat the same as the dial's Done; timer.stop { chatId } stops it. Goals go as a /goal message (chat.send).
+
+  const TIMER_MIN = 10, TIMER_MAX = 600;
+
+  function isoOf(ms) { return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null; }
+
+  // the phone's chat id for a computer chat id: a bot id for a dm, else the chat's own id
+  function phoneChatId(view, rawId) {
+    const c = ((view && view.chats) || []).find(x => x.id === rawId);
+    if (!c) return null;
+    if (c.kind !== 'dm') return c.id;
+    const agents = (view.agents || []).filter(a => a && a.name);
+    return botIds(agents, leadOf(view))[c.members && c.members[0]] || null;
+  }
+
+  // ops: { list() -> [{ chatId (computer's), until (ms or null), mins, startedAt (ms), paused }], workFor() }
+  function withTimers(state, view, ops) {
+    if (!ops) return state;
+    const out = [];
+    for (const t of ops.list() || []) {
+      const id = t && phoneChatId(view, t.chatId);
+      if (!id) continue;
+      const endless = t.until == null || t.until === Infinity;
+      out.push({ chatId: id, minutes: endless ? null : Math.round(+t.mins) || null, startedAt: isoOf(+t.startedAt), until: endless ? null : isoOf(+t.until), paused: !!t.paused });
+    }
+    out.sort((a, b) => String(a.chatId).localeCompare(String(b.chatId)));
+    state.timers = out;
+    const w = ops.workFor();
+    state.workFor = w === 'off' || w === 'inf' ? w : (Number.isInteger(w) && w >= TIMER_MIN && w <= TIMER_MAX ? w : 'off');
+    state.version = hash(JSON.stringify(Object.assign({}, state, { version: '' })));
+    return state;
+  }
+
+  // null when it isn't a timer action; { error } or { do: 'timerStart' | 'timerStop', chat, value }
+  function timerRoute(view, a) {
+    if (!a || (a.type !== 'timer.start' && a.type !== 'timer.stop')) return null;
+    const chat = chatFor(view, a.chatId);
+    if (!chat) return { error: 'That chat isn’t on the computer any more.' };
+    if (a.type === 'timer.stop') return { do: 'timerStop', chat };
+    const m = a.minutes;
+    if (m === 'inf') return { do: 'timerStart', chat, value: 'inf' };
+    if (!Number.isInteger(m) || m < TIMER_MIN || m > TIMER_MAX) return { error: 'Pick ' + TIMER_MIN + ' minutes to ' + (TIMER_MAX / 60) + ' hours, or Continuous.' };
+    return { do: 'timerStart', chat, value: m };
+  }
+
+  // ops: { start(chat, value) -> true, stop(chat) -> true when one was running }
+  function timerDo(r, ops) {
+    if (r.error) return { ok: false, error: r.error };
+    if (!ops) return { ok: false, error: CANT };
+    if (r.do === 'timerStop') return ops.stop(r.chat.raw) ? { ok: true } : { ok: false, error: 'There’s no timer running in that chat.' };
+    return ops.start(r.chat.raw, r.value) ? { ok: true } : { ok: false, error: 'Squall couldn’t start the timer.' };
+  }
+
+  root.SquallTimers = { withTimers, timerRoute, timerDo, phoneChatId, TIMER_MIN, TIMER_MAX };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -768,7 +826,7 @@
     const projects = projectCache(() => root.SquallTeamOps, () => pushNow());
     const teamView = () => { const v = Object.assign(laterView(), { manage: !!root.SquallTeamOps }); const p = projects.list(); if (p) v.projects = p; return v; };
     const notes = notesDesk(() => root.SquallNotesOps, () => Date.now());
-    const phoneState = () => { const v = teamView(); return withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps); };
+    const phoneState = () => { const v = teamView(); return withTimers(withModels(withNotes(withTeam(withLater(buildState(v), v), v), notes.view()), v, root.SquallModelOps), v, root.SquallTimerOps); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -871,10 +929,12 @@
           const note = team ? null : notes.route(m.body || {});
           const photo = team || note ? null : photoRoute(view(), m.body || {});
           const model = team || note || photo ? null : modelRoute(m.body || {}, root.SquallModelOps);
+          const timer = team || note || photo || model ? null : timerRoute(view(), m.body || {});
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
           else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
           else if (model) { result = modelDo(model, root.SquallModelOps); await pushNow(); }
+          else if (timer) { result = timerDo(timer, root.SquallTimerOps); await pushNow(); }
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }
