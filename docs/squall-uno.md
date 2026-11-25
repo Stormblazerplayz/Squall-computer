@@ -93,6 +93,8 @@ answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain se
 | `check` | – | `{ ok, text, settings }` — asks Anthropic for the model's details (free) and checks Docker; `text` is plain sentences saying what works and what to fix |
 | `setMaxSteps` | `value` (10–300) | `{ ok, settings }` |
 | `watch` | `computerId` or null (window only) | `{ ok }` — the window gets live frames for that computer |
+| `shots` | `sessionId` | `{ ok, sessionId, shots[] }` — that session's replay pictures (Shot objects, oldest first, no pictures in them) |
+| `shot` | `sessionId`, `id` | `{ ok, shot }` — one Shot with `jpeg` (base64) added; `{ok:false}` once it isn't kept anymore |
 
 ### Live frames
 
@@ -106,6 +108,26 @@ answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain se
 - Window: after `watch`, the page gets pushes `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}`
   (see Pushes below), starting with the newest frame right away if there is one. `watch` with `computerId: null` stops.
 
+### Replay pictures (the filmstrip)
+
+While a session runs, Squall keeps real pictures of the screen so you can scrub back through it: every screenshot
+Squall Uno takes, and the screen right after each click, drag, typing, key or scroll (the first live frame about
+0.7 s later, or one picture taken when Squall Uno moves on sooner or the session ends). They live in memory only (gone
+after Squall restarts): each session keeps its newest 120, and all sessions together stay under 64 MB, dropping the
+oldest pictures of the session used longest ago first.
+
+```jsonc
+// Shot
+{ "id": 1764000000123, "sessionId": "uno-…", "computerId": "pc-chief", "step": 4, "seq": 101,   // the event it shows
+  "at": 1764000000000, "kind": "click", "text": "Clicked at (412, 230)",
+  "width": 1280, "height": 800, "cursorX": 412, "cursorY": 230, "bytes": 84213 }
+```
+
+- Phone: `GET /api/v1/uno/shot?session=<sessionId>&id=<id>` (bearer token) answers `200 image/jpeg` with headers
+  `X-Uno-Step`, `X-Uno-Width`, `X-Uno-Height`, `X-Uno-Cursor`, or `404 {error:"no_shot"}`. A kept picture never
+  changes, so the phone may cache it.
+- Window: the `shot` op, and a push for every new one (below).
+
 ### Pushes to the window
 
 These use the existing `Page.Tell(name, payload)`, which posts `{"event": name, ...payload}` to the page (the same
@@ -117,6 +139,7 @@ carries the name, no payload has a key called `event`:
   changes (sessions newest first, max 30).
 - `{"event":"unoFrame","computerId","seq","width","height","cursorX","cursorY","jpeg":"<base64>"}` for each new
   frame of the computer the window watches (see `watch`).
+- `{"event":"unoShot","shot":{…Shot}}` for every new replay picture (without the picture; get it with `shot`).
 
 ## How a session runs
 

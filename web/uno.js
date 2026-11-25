@@ -323,12 +323,38 @@
   const svg = (name, size) => name === 'bolt' ? ICONS.bolt : '<svg viewBox="0 0 24 24" width="' + (size || 14) + '" height="' + (size || 14) + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || ICONS.dot) + '</svg>';
   const CURSOR_SVG = '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 2.5 4 19l4.4-4.2 2.9 6.7 2.6-1.1-2.9-6.6H17z" fill="#fff" stroke="#0b0a12" stroke-width="1.4" stroke-linejoin="round"/></svg>';
 
+  // ---------------- replay pictures (the filmstrip) ----------------
+
+  const MAX_SHOTS = 200;
+  const isShot = x => !!x && typeof x === 'object' && Number.isFinite(+x.id) && typeof x.sessionId === 'string';
+  /** Merges shots (no pictures) into a session's list: by id, oldest first, the newest MAX_SHOTS kept. */
+  function addShots(list, incoming) {
+    const by = new Map((list || []).map(x => [+x.id, x]));
+    (Array.isArray(incoming) ? incoming : [incoming]).filter(isShot).forEach(x => by.set(+x.id, x));
+    const out = Array.from(by.values()).sort((a, b) => +a.id - +b.id);
+    return out.length > MAX_SHOTS ? out.slice(out.length - MAX_SHOTS) : out;
+  }
+  /** The shot delta steps away from id (clamped to the ends); the first one when id isn't in the list. */
+  function shotNeighbor(list, id, delta) {
+    if (!list || !list.length) return null;
+    const i = list.findIndex(x => +x.id === +id);
+    if (i < 0) return list[delta < 0 ? list.length - 1 : 0];
+    return list[Math.max(0, Math.min(list.length - 1, i + (delta || 0)))];
+  }
+  /** "Step 7 · Clicked at (412, 230)" */
+  function shotLabel(shot) {
+    if (!shot) return '';
+    const text = String(shot.text || '').replace(/\s+/g, ' ').trim();
+    return (num(shot.step) && +shot.step > 0 ? 'Step ' + (+shot.step) : 'Start') + (text ? ' · ' + text : '');
+  }
+
   function wire(h) {
     if (!h || !h.Bridge || typeof document === 'undefined') return null;
     const Bridge = h.Bridge, S = h.S || {};
     const esc = h.esc || (s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
     const available = !!Bridge.host;
     const store = newStore();
+    const film = { lists: {}, loaded: {}, loading: {}, pics: new Map(), asked: new Set(), replay: null, playing: 0, sessionId: null };
     const ui = {
       open: false, agentId: null, agentName: '', watching: null, viewSession: null, wheelLocal: false, clickMode: 'left_click',
       settings: false, err: '', note: '', checkText: '', busy: {}, lastPush: 0, loaded: false, missing: '', refreshing: false,
@@ -373,6 +399,7 @@
     Bridge.on('unoState', m => { ui.lastPush = Date.now(); const before = watchedComputer(); mergeState(store, payloadOf(m), false); ui.loaded = true; ui.missing = ''; changed(); rewatchIfNeeded(before); });
     Bridge.on('uno', m => { const e = eventOf(m); if (e) onEvent(e); });
     Bridge.on('unoFrame', m => onFrame(m));
+    Bridge.on('unoShot', m => onShot(m));
     // the contract's "uno" push puts the Event under "event", where the bridge looks for the push's name: catch it here too
     try {
       const wv = root.chrome && root.chrome.webview;
@@ -720,6 +747,7 @@
       }
 
       renderFeed(sess);
+      renderFilm(sess);
       renderRecent(cur, sess);
       renderSettings();
       layoutScreen();
@@ -868,6 +896,187 @@
       if (ui.err) flash.t = setTimeout(() => { ui.err = ''; const f = $u('.uno-flash'); if (f) f.hidden = true; }, 9000);
     }
 
+    // ---------------- the replay filmstrip: real pictures of each step (docs/squall-uno.md "Replay pictures") ----------------
+
+    function onShot(m) {
+      const p = payloadOf(m);
+      const shot = p && p.shot;
+      if (!isShot(shot)) return;
+      film.lists[shot.sessionId] = addShots(film.lists[shot.sessionId], shot);
+      if (!ui.open) return;
+      const sess = shownSession();
+      if (sess && sess.id === shot.sessionId) renderFilm(sess);
+    }
+
+    async function loadShots(sessionId) {
+      if (!available || film.loading[sessionId]) return;
+      film.loading[sessionId] = true;
+      try {
+        const res = await op('shots', { sessionId });
+        if (res.ok) film.lists[sessionId] = addShots(film.lists[sessionId], res.shots || []);
+        film.loaded[sessionId] = true;
+      } finally { film.loading[sessionId] = false; }
+      const sess = shownSession();
+      if (ui.open && sess && sess.id === sessionId) renderFilm(sess);
+    }
+
+    /** The picture of one shot, as base64 (kept for the 80 newest asked). */
+    async function shotPic(shot) {
+      const key = +shot.id;
+      if (film.pics.has(key)) return film.pics.get(key);
+      if (film.asked.has(key)) return null;
+      film.asked.add(key);
+      const res = await op('shot', { sessionId: shot.sessionId, id: key });
+      film.asked.delete(key);
+      if (!res.ok || !res.shot || !res.shot.jpeg) return null;
+      film.pics.set(key, res.shot.jpeg);
+      while (film.pics.size > 80) film.pics.delete(film.pics.keys().next().value);
+      return res.shot.jpeg;
+    }
+
+    function ensureFilmEls() {
+      let row = $u('.uno-film');
+      if (!row) {
+        const now = $u('.uno-now');
+        if (!now) return null;
+        row = document.createElement('div');
+        row.className = 'uno-film';
+        row.innerHTML = '<div class="uno-film-h"><span class="uno-lbl">Replay</span><span class="uno-film-n"></span>' +
+          '<button class="uno-key uno-film-play" data-u="shotPlay" title="Play the steps">' + svg('play', 12) + '<span>Play</span></button></div>' +
+          '<div class="uno-film-strip" role="list"></div>';
+        now.insertAdjacentElement('afterend', row);
+        if (typeof IntersectionObserver !== 'undefined') {
+          film.io = new IntersectionObserver(entries => entries.forEach(en => { if (en.isIntersecting) fillThumb(en.target); }), { root: row.querySelector('.uno-film-strip'), rootMargin: '0px 200px' });
+        }
+      }
+      const box = $u('.uno-box');
+      if (box && !box.querySelector('.uno-replay')) {
+        const ov = document.createElement('div');
+        ov.className = 'uno-replay';
+        ov.hidden = true;
+        ov.innerHTML = '<img class="uno-replay-img" alt="" draggable="false"><i class="uno-replay-dot" hidden></i>' +
+          '<div class="uno-replay-bar"><button class="uno-replay-nav" data-u="shotPrev" title="Step back (←)">‹</button><span class="uno-replay-t"></span>' +
+          '<button class="uno-replay-nav" data-u="shotNext" title="Step forward (→)">›</button><button class="uno-btn primary uno-replay-live" data-u="shotLive">Back to live</button></div>';
+        box.appendChild(ov);
+      }
+      return row;
+    }
+
+    function renderFilm(sess) {
+      const row = ensureFilmEls();
+      if (!row) return;
+      if (!available || !ui.loaded || !sess) { row.hidden = true; return; }
+      if (film.sessionId !== sess.id) {
+        film.sessionId = sess.id;
+        if (film.replay && film.replay.sessionId !== sess.id) { stopPlay(); film.replay = null; paintReplay(); }
+      }
+      if (!film.loaded[sess.id]) loadShots(sess.id);
+      const list = film.lists[sess.id] || [];
+      row.hidden = !list.length;
+      if (!list.length) return;
+      const n = row.querySelector('.uno-film-n');
+      const label = list.length + (list.length === 1 ? ' picture' : ' pictures');
+      if (n && n.textContent !== label) n.textContent = label;
+      const pb = row.querySelector('.uno-film-play');
+      if (pb) { pb.classList.toggle('on', !!film.playing); const sp = pb.querySelector('span'); if (sp) sp.textContent = film.playing ? 'Pause' : 'Play'; }
+      const strip = row.querySelector('.uno-film-strip');
+      const have = new Set(Array.from(strip.children).map(el => el.getAttribute('data-uv')));
+      const atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 30;
+      // remove dropped ones, add new ones at the end (they slide in)
+      Array.from(strip.children).forEach(el => { if (!list.some(x => String(x.id) === el.getAttribute('data-uv'))) el.remove(); });
+      let added = false;
+      list.forEach(x => {
+        if (have.has(String(x.id))) return;
+        const b = document.createElement('button');
+        b.className = 'uno-thumb new';
+        b.setAttribute('data-u', 'shot');
+        b.setAttribute('data-uv', String(x.id));
+        b.setAttribute('role', 'listitem');
+        b.title = shotLabel(x);
+        b.innerHTML = '<img alt="" draggable="false"><span>' + esc(num(x.step) && +x.step > 0 ? String(+x.step) : '·') + '</span>';
+        strip.appendChild(b);
+        requestAnimationFrame(() => requestAnimationFrame(() => b.classList.remove('new')));
+        if (film.io) film.io.observe(b); else fillThumb(b);
+        added = true;
+      });
+      const on = film.replay && film.replay.id;
+      strip.querySelectorAll('.uno-thumb').forEach(el => el.classList.toggle('on', String(on) === el.getAttribute('data-uv')));
+      if (added && atEnd && !film.replay) strip.scrollTo({ left: strip.scrollWidth, behavior: 'smooth' });
+    }
+
+    async function fillThumb(el) {
+      if (!el || el._filled) return;
+      el._filled = true;
+      const list = film.lists[film.sessionId] || [];
+      const shot = list.find(x => String(x.id) === el.getAttribute('data-uv'));
+      if (!shot) return;
+      const pic = await shotPic(shot);
+      const img = el.querySelector('img');
+      if (pic && img) img.src = 'data:image/jpeg;base64,' + pic;
+      else { el._filled = false; el.classList.add('gone'); }
+    }
+
+    async function showShot(id) {
+      const sess = shownSession();
+      const list = sess ? film.lists[sess.id] || [] : [];
+      const shot = list.find(x => String(x.id) === String(id));
+      if (!shot) return;
+      film.replay = { sessionId: shot.sessionId, id: +shot.id };
+      renderFilm(sess);
+      paintReplay();
+      const pic = await shotPic(shot);
+      if (!film.replay || film.replay.id !== +shot.id) return;
+      if (!pic) { flash('That picture isn’t kept anymore.'); return; }
+      paintReplay(pic);
+      const el = view && view.querySelector('.uno-thumb[data-uv="' + shot.id + '"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    }
+
+    function paintReplay(pic) {
+      const ov = $u('.uno-replay');
+      if (!ov) return;
+      if (!film.replay) { ov.hidden = true; ov.classList.remove('on'); return; }
+      const list = film.lists[film.replay.sessionId] || [];
+      const shot = list.find(x => +x.id === film.replay.id);
+      ov.hidden = false;
+      requestAnimationFrame(() => ov.classList.add('on'));
+      const t = ov.querySelector('.uno-replay-t');
+      if (t) t.textContent = shotLabel(shot) + (shot ? '  (' + (list.indexOf(shot) + 1) + ' of ' + list.length + ')' : '');
+      const img = ov.querySelector('.uno-replay-img');
+      if (img && pic) { img.classList.remove('fade'); void img.offsetWidth; img.src = 'data:image/jpeg;base64,' + pic; img.classList.add('fade'); }
+      const dot = ov.querySelector('.uno-replay-dot');
+      const p = shot && num(shot.cursorX) && num(shot.cursorY) ? framePct(+shot.cursorX, +shot.cursorY, +shot.width || ui.screenW, +shot.height || ui.screenH) : null;
+      if (dot) { dot.hidden = !p; if (p) { dot.style.left = p.left + '%'; dot.style.top = p.top + '%'; } }
+    }
+
+    function stepShot(delta) {
+      const sess = shownSession();
+      const list = sess ? film.lists[sess.id] || [] : [];
+      const next = shotNeighbor(list, film.replay ? film.replay.id : null, delta);
+      if (next) showShot(next.id);
+    }
+
+    function play() {
+      const sess = shownSession();
+      const list = sess ? film.lists[sess.id] || [] : [];
+      if (!list.length) return;
+      if (!film.replay || +film.replay.id === +list[list.length - 1].id) showShot(list[0].id);
+      film.playing = setInterval(() => {
+        const s2 = shownSession();
+        const l2 = s2 ? film.lists[s2.id] || [] : [];
+        if (!film.replay || !l2.length || +film.replay.id >= +l2[l2.length - 1].id) { stopPlay(); return; }
+        stepShot(1);
+      }, 500);
+      renderFilm(sess);
+    }
+
+    function stopPlay() {
+      if (film.playing) clearInterval(film.playing);
+      film.playing = 0;
+      const pb = $u('.uno-film-play');
+      if (pb) { pb.classList.remove('on'); const sp = pb.querySelector('span'); if (sp) sp.textContent = 'Play'; }
+    }
+
     // ---------------- doing things ----------------
 
     async function run(name, fields, after) {
@@ -896,7 +1105,7 @@
       const t = e.target;
       // a click on the screen while you have the wheel
       const box = t.closest('.uno-box');
-      if (box && wheelOn() && !t.closest('.uno-empty:not([hidden])')) {
+      if (box && wheelOn() && !t.closest('.uno-empty:not([hidden])') && !t.closest('.uno-replay:not([hidden])')) {
         const rect = box.getBoundingClientRect();
         const p = displayToScreen(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, ui.screenW, ui.screenH);
         if (p) { ui.localClickAt = Date.now(); ripple(p.x, p.y, true); input(ui.clickMode, { x: p.x, y: p.y }); }
@@ -930,6 +1139,11 @@
           break;
         }
         case 'backNow': ui.viewSession = null; render(); break;
+        case 'shot': showShot(v); break;
+        case 'shotLive': stopPlay(); film.replay = null; paintReplay(); renderFilm(shownSession()); break;
+        case 'shotPrev': stepShot(-1); break;
+        case 'shotNext': stepShot(1); break;
+        case 'shotPlay': if (film.playing) stopPlay(); else play(); break;
         case 'session': {
           ui.viewSession = cur && cur.id === v ? null : v;
           render();
@@ -980,6 +1194,9 @@
 
     function onKey(e) {
       const t = e.target;
+      if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && film.replay && !/INPUT|TEXTAREA|SELECT/.test(t.tagName || '')) {
+        e.preventDefault(); stepShot(e.key === 'ArrowLeft' ? -1 : 1); return;
+      }
       if (e.key !== 'Enter' || e.isComposing) return;
       if (t.classList.contains('uno-type')) { e.preventDefault(); const b = $u('[data-u="type"]'); if (b) b.click(); }
       else if (t.classList.contains('uno-note')) { e.preventDefault(); const b = $u('[data-u="handback"]'); if (b) b.click(); }
@@ -1014,6 +1231,7 @@
       if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName || '')) return;
       if (document.querySelector('.modal-back, .qk-pop, .qk-back, .use-pop, .cx-pop, .mm-pop, .lightbox')) return;
       if (ui.settings) { ui.settings = false; render(); return; }
+      if (film.replay) { stopPlay(); film.replay = null; paintReplay(); renderFilm(shownSession()); return; }
       close(); if (h.onClose) h.onClose();
     });
     document.addEventListener('visibilitychange', () => { if (!document.hidden && ui.open) { paintFrame(); renderFeedTimes(); } });
@@ -1029,6 +1247,7 @@
   const api = {
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
     computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, nowLine, ago,
+    addShots, shotNeighbor, shotLabel,
     feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

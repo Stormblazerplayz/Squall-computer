@@ -34,6 +34,7 @@ namespace Squall.Link.Tests
                 Runner = Docker, Model = Model, EnvKey = () => Env,
                 FrameInterval = frameInterval ?? TimeSpan.FromMilliseconds(50),
                 ComputerReadyPoll = TimeSpan.FromMilliseconds(1),
+                ShotDelay = TimeSpan.FromMilliseconds(30),
             });
             Hub.EventAdded += e => Pushed.Enqueue(e);
             Hub.Changed += () => System.Threading.Interlocked.Increment(ref ChangedCount);

@@ -128,6 +128,42 @@ namespace Squall.Link.Tests
             var (_, stopped) = await Op("{\"op\":\"stop\",\"sessionId\":\"" + sid + "\"}", _token);
             Assert.True((bool)stopped!["ok"]!);
         }
+
+        private async Task<HttpResponseMessage> Shot(string query, string? token)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/api/v1/uno/shot" + query);
+            if (token != null) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return await _http.SendAsync(req);
+        }
+
+        [Fact]
+        public async Task ReplayPicturesComeAsJpegs()
+        {
+            _rig.Model.Reply("tool_use", FakeModel.Tool("tu_1", "screenshot"));
+            _rig.Model.Reply("end_turn", FakeModel.Text("Done."));
+            var (_, started) = await Op("{\"op\":\"start\",\"agentId\":\"chief\",\"agentName\":\"Chief\",\"task\":\"Look\"}", _token);
+            string sid = (string)started!["sessionId"]!;
+            await _rig.Hub.RunTask(sid);
+
+            var (status, list) = await Op("{\"op\":\"shots\",\"sessionId\":\"" + sid + "\"}", _token);
+            Assert.Equal(HttpStatusCode.OK, status);
+            var shot = (JsonObject)((JsonArray)list!["shots"]!).Single()!;
+            long id = (long)shot["id"]!;
+
+            using (var none = await Shot("?session=" + sid + "&id=" + id, null)) Assert.Equal(HttpStatusCode.Unauthorized, none.StatusCode);
+            using (var missing = await Shot("?session=" + sid + "&id=1", _token))
+            {
+                Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+                Assert.Equal("no_shot", (string?)JsonNode.Parse(await missing.Content.ReadAsStringAsync())!["error"]);
+            }
+            using (var bad = await Shot("?session=" + sid + "&id=abc", _token)) Assert.Equal(HttpStatusCode.NotFound, bad.StatusCode);
+            using var res = await Shot("?session=" + sid + "&id=" + id, _token);
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+            Assert.Equal("image/jpeg", res.Content.Headers.ContentType!.MediaType);
+            Assert.Equal(FakeDocker.Jpeg, await res.Content.ReadAsByteArrayAsync());
+            Assert.Equal("1", res.Headers.GetValues("X-Uno-Step").Single());
+            Assert.Equal("10,20", res.Headers.GetValues("X-Uno-Cursor").Single());
+        }
     }
 
     public class UnoDesktopLinkTests
@@ -168,6 +204,15 @@ namespace Squall.Link.Tests
             Assert.Equal("pc-chief", (string?)frame["computerId"]);
             Assert.Equal(Convert.ToBase64String(FakeDocker.Jpeg), (string?)frame["jpeg"]);
             Assert.Equal(1280, (int)frame["width"]!);
+
+            // replay pictures are pushed without the picture itself
+            model.Reply("tool_use", FakeModel.Tool("tu_1", "screenshot"));
+            model.Reply("end_turn", FakeModel.Text("Looked."));
+            var again = (JsonObject)(await link.HandlePageCommandAsync(JsonDocument.Parse("{\"do\":\"uno\",\"op\":\"start\",\"agentId\":\"chief\",\"agentName\":\"Chief\",\"task\":\"Look\"}").RootElement))!;
+            await link.Uno.RunTask((string)again["sessionId"]!);
+            var shotPush = posted.Single(m => (string?)m["event"] == "unoShot");
+            Assert.Equal((string)again["sessionId"]!, (string?)shotPush["shot"]!["sessionId"]);
+            Assert.Null(shotPush["shot"]!["jpeg"]);
 
             Assert.All(posted, m => Assert.DoesNotContain(key, m.ToJsonString()));
         }

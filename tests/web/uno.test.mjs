@@ -278,3 +278,25 @@ test('the Uno tab shows every computer from the real state, and Stop everything 
     delete globalThis.SquallLinkCore;
   }
 });
+
+test('replay shots merge by id, oldest first, and step to their neighbors', () => {
+  const s = (id, step, text) => ({ id, sessionId: 'uno-a', step, text });
+  let list = U.addShots([], [s(3, 2, 'Clicked'), s(1, 1, 'Took a screenshot')]);
+  list = U.addShots(list, s(3, 2, 'Clicked again'));
+  list = U.addShots(list, { id: 'x' });
+  list = U.addShots(list, null);
+  assert.deepEqual(list.map(x => x.id), [1, 3]);
+  assert.equal(list[1].text, 'Clicked again');
+  const many = U.addShots([], Array.from({ length: 230 }, (_, i) => s(i + 1, i, '')));
+  assert.equal(many.length, 200);
+  assert.equal(many[0].id, 31);
+  assert.equal(U.shotNeighbor(list, 1, 1).id, 3);
+  assert.equal(U.shotNeighbor(list, 3, 1).id, 3);
+  assert.equal(U.shotNeighbor(list, 1, -1).id, 1);
+  assert.equal(U.shotNeighbor(list, null, 1).id, 1);
+  assert.equal(U.shotNeighbor(list, null, -1).id, 3);
+  assert.equal(U.shotNeighbor([], 1, 1), null);
+  assert.equal(U.shotLabel(s(3, 7, '  Clicked   at (412, 230) ')), 'Step 7 · Clicked at (412, 230)');
+  assert.equal(U.shotLabel(s(3, 0, '')), 'Start');
+  assert.equal(U.shotLabel(null), '');
+});
