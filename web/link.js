@@ -65,6 +65,7 @@
       const dm = dmOf[a.name];
       const busy = (view.chats || []).some(c => (c.typing || []).includes(a.name));
       let status = BOT_STATUS[a.status] || 'idle';
+      if (status === 'idle' && a.napping) status = 'napping';   // asleep in Squall (idle a few minutes; a message or Wake wakes it)
       if (busy) status = 'working';
       if (waiting[a.name]) status = 'waiting';
       if (busy && !typing) typing = ids[a.name];
@@ -350,6 +351,16 @@
       }
       case 'todo.add': case 'todo.set': case 'todo.give': case 'todo.delete': case 'todo.clearDone':
         return routeTodo(view, a, type);
+      case 'bot.create': {
+        // the phone's New teammate sheet: { name, role, color: "#RRGGBB", job }. Squall checks the name the way its own New teammate does.
+        const name = String(a.name || '').trim();
+        if (!name) return { error: 'Pick a name for the new teammate.' };
+        const color = String(a.color || '').trim();
+        if (color && !/^#[0-9a-fA-F]{6}$/.test(color)) return { error: 'Pick one of the colors.' };
+        return { do: 'botCreate', bot: { name: name.slice(0, 40), role: String(a.role || '').trim().slice(0, 60), color: color.toUpperCase(), job: String(a.job || '').trim().slice(0, 2000) } };
+      }
+      case 'chief.wake': return { do: 'chiefWake' };
+      case 'chief.nap': return { do: 'chiefNap' };
       case 'settings.save': return { do: 'none' };
       case 'usage.settings': {
         // the phone's Plan usage screen: { throttle: true/false } and/or { limit: 10 to 100, or null for none }
@@ -477,7 +488,8 @@
           if (m.kind === 'approve' && m.approve && m.approve.state === 'waiting')
             approvals.push({ requestId: m.approve.requestId, who: m.who, tool: m.approve.tool, detail: m.approve.detail, text: m.text, at: m.time });
       return {
-        agents: S.agents || [],
+        // a teammate asleep in Squall shows as napping on the phone
+        agents: (S.agents || []).map(a => (h.isSleeping && a && h.isSleeping(a) ? Object.assign({}, a, { napping: true }) : a)),
         lead: S.lead ? S.lead.name : null,
         chats: (S.chats || []).map(c => ({
           id: c.id, kind: c.kind, name: c.name, members: c.members || [], unread: c.unread || 0,
@@ -554,6 +566,20 @@
           return { ok: true };
         }
         case 'todoClearDone': h.todo.clearDone(); await pushNow(); return { ok: true };
+        case 'botCreate': {
+          if (!h.addBot) return { ok: false, error: CANT };
+          await h.addBot(r.bot);
+          await pushNow();
+          const after = view();
+          const ids = botIds(after.agents, after.lead || (after.agents.find(x => x.lead) || {}).name);
+          return ids[r.bot.name] ? { ok: true, id: ids[r.bot.name] } : { ok: true };
+        }
+        case 'chiefWake': case 'chiefNap': {
+          if (!h.chief) return { ok: false, error: CANT };
+          if (r.do === 'chiefWake') h.chief.wake(); else h.chief.nap();
+          await pushNow();
+          return { ok: true };
+        }
         case 'usage': {
           if (!h.setUsage) return { ok: false, error: CANT };
           const change = {};

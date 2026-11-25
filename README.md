@@ -50,3 +50,11 @@ can add one, edit it, turn it on or off, skip today, or delete it (`routine.save
 `routine.delete`). Each one carries `lastRun` (the day it last ran or was skipped), so the phone knows today's run is done. Squall runs routines on every day, weekdays or weekends, so a phone routine on other days is refused with a
 reason. Editing adds the changed routine and removes the old one (the host has no edit). **On / Off** also shows in the
 Routines list on the computer: an off routine stays but doesn't run (kept in `localStorage`, `squall.routinesOff`).
+
+## Team controls on the phone
+
+The phone's **New teammate** sheet (`bot.create`: name, role, color, what they do) adds a teammate the same way Squall's own
+New teammate window does, with the same name checks (letters and digits, not already on the team, at most 12). The phone gets
+the new teammate's id back and opens its chat. A teammate asleep in Squall shows as **napping** on the phone. **Wake Chief**
+(`chief.wake`) wakes Chief to look for something useful to do, and **Let Chief nap** (`chief.nap`) puts it back to sleep. A
+Chief running as a live session doesn't nap, so those two say so.
