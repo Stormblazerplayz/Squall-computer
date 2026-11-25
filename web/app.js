@@ -450,7 +450,7 @@
       let owner = null, tool = null;
       for (const t of a.turns) {
         const hit = t.tools.find(x => x.id === c.tool_use_id);
-        if (hit) { hit.status = c.is_error ? 'error' : 'ok'; owner = t; tool = hit; }
+        if (hit) { hit.status = c.is_error ? 'error' : 'ok'; owner = t; tool = hit; if (hit.name === 'Bash') hit.out = toolResultText(c.content).slice(-4000); }   // (for the phone's Live work terminal)
       }
       // a picture the bot read (image content in a tool result) is shown on the turn that ran the tool
       if (owner && Array.isArray(c.content)) for (const ib of c.content) if (ib && ib.type === 'image' && ib.source && ib.source.type === 'base64' && ib.source.data) addTurnImage(a, owner, tool, ib.source);
@@ -1686,6 +1686,7 @@
   function askAgent(chat, name, note, epoch) {
     return queueFor(name, async () => {
       if (epoch !== S.stopEpoch) return { name, isError: true, stopped: true, text: '', tasks: [], mentions: [] };
+      if (!jobStart(chat, name, note)) return { name, isError: true, stopped: true, text: '', tasks: [], mentions: [] };   // paused from the phone: no nudges until Resume
       let r;
       const peer = S.liveMode && S.link.status === 'on' ? peerFor(name) : null;
       const goLive = !!peer && peer.status !== 'offline';
@@ -1701,7 +1702,7 @@
           const real = NO_RELAY() && S.mirror[name] && S.mirror[name].session ? S.mirror[name].session.cwd || '' : '';   // direct: the bot's real session, from its folder
           r = await runAgent(name, built.prompt, sessionKey(chat, name), voiceOn && voiceMode === 'call' && chat.id === S.active ? CALL_WARM_S : warmFor(chat), real);
         }
-      } finally { delete typing[name]; const ag = S.byName[name]; if (ag) ag.lastActive = Date.now(); }
+      } finally { delete typing[name]; const ag = S.byName[name]; if (ag) { ag.lastActive = Date.now(); if (ag.job) ag.job.endedAt = Date.now(); } }
       const tasks = !r.isError && chat.kind !== 'dm' && name === chat.lead ? parseTasks(r.text, chat) : [];
       const actions = r.isError ? [] : parseActions(r.text);
       const shown = stripTasks(r.text) || (tasks.length ? 'Here’s the plan.' : actions.length ? 'On it.' : '(no reply)');
@@ -2064,6 +2065,7 @@
     setPaused: (on, from) => setTeamPaused(on, from),
     markRead: c => { if (c.unread) { c.unread = 0; saveSoon(); renderAll(); } },
     clear: c => clearChat(c),
+    work: { list: () => workForPhone(), stop: name => phoneStopJob(name), pause: (name, on) => phonePauseJob(name, on) },
     answer: (rid, decision) => answerApproval(rid, decision),
     group: (name, members) => { const c = createGroup(name, members); if (c) renderAll(); return c; },
     // the shared To do list (TODO, further down): the phone sees it and keeps it with the same functions as the right pane
@@ -3232,6 +3234,100 @@
       if (chat) addMessage(chat, { who: APP, kind: 'event', text: '⏹ Stopped ' + name + '.' });
     }
     renderLiveSoon();
+  }
+
+  // ---------- live work on the phone (its Live work screens: what each bot is doing, step by step, with Stop, Pause and a note).
+  // Each bot's current job is a.job: what it's for (Storm's ask, a routine, idle work), who gave it and when it started. A nudge (work
+  // timer, To do drive, idle session) carries on the same job. The steps, terminal and files come from the run's real tool calls ----------
+  const WORK_SHOW_MS = 10 * 60000;   // a finished job stays on the phone this long
+  function toolResultText(content) {
+    if (typeof content === 'string') return content;
+    return Array.isArray(content) ? content.filter(x => x && x.type === 'text' && x.text).map(x => x.text).join('\n') : '';
+  }
+  function firstSentence(text) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    const m = /^(.{8,}?[.!?])(\s|$)/.exec(t);
+    const one = m ? m[1] : t;
+    return one.length > 100 ? one.slice(0, 99) + '…' : one;
+  }
+  // Starts or carries on the bot's job for this turn. False when the job is paused from the phone and this is a nudge, not Storm.
+  function jobStart(chat, name, note) {
+    const a = S.byName[name];
+    if (!a) return true;
+    const j = a.job;
+    if (note && j && j.paused) return false;
+    const routine = /^Routine "([^"]+)"/.exec(note || '');
+    if (note && !routine && j && j.chat === chat.id && !j.stopped) { j.endedAt = 0; return true; }   // a nudge: the same job goes on
+    let title, from;
+    if (routine) { title = 'Routine: ' + routine[1]; from = 'Routine'; }
+    else if (a.idleJob) { title = 'Farside ' + a.idleJob + ' (idle work)'; from = 'Idle work'; }
+    else {
+      const last = note ? null : (chat.messages || []).slice().reverse().find(m => m.kind === 'user' && String(m.text || '').trim());
+      title = last ? firstSentence(last.text) : note ? firstSentence(note) : 'Working';
+      from = last ? 'Storm' : APP;
+    }
+    a.job = { chat: chat.id, title, from, startedAt: Date.now(), endedAt: 0, paused: false, stopped: false };
+    return true;
+  }
+  function waitingAsk(name) {
+    for (const c of S.chats) for (const m of c.messages || []) if (m.who === name && m.kind === 'approve' && m.approve && m.approve.state === 'waiting') return m.approve.requestId;
+    return null;
+  }
+  function workForPhone() {
+    const now = Date.now(), out = [];
+    for (const a of S.agents) {
+      const j = a.job, mi = S.mirror[a.name];
+      const running = a.status === 'working' || !!(mi && mirrorBusy(mi, false)) || !!(j && !j.endedAt && !j.paused);
+      const paused = !!(j && j.paused);
+      if (!running && !paused && !(j && j.endedAt && now - j.endedAt < WORK_SHOW_MS)) continue;
+      const ask = waitingAsk(a.name);
+      const ended = !running && !paused;
+      const state = paused ? 'paused' : running ? (ask ? 'waiting' : 'working') : (j && j.stopped) || a.status === 'stopped' || a.status === 'error' ? 'stopped' : 'done';
+      const tools = [];
+      for (const t of a.turns || []) for (const x of t.tools || []) {
+        const i = x.input || {};
+        tools.push({ title: toolSummary(x), name: x.name, status: x.status, command: x.name === 'Bash' ? String(i.command || '') : '', out: x.out || '', file: i.file_path || i.notebook_path || '' });
+      }
+      out.push({
+        name: a.name, title: j ? j.title : (a.activity || 'Working'), from: j ? j.from : '', state, askId: ask,
+        startedAt: j ? j.startedAt : null,
+        now: paused ? 'Paused. Resume and ' + a.name + ' carries on.' : ended ? (a.activity || '') : (a.activity || 'Working…'),
+        tools,
+      });
+    }
+    return out;
+  }
+  function phoneStopJob(name) {
+    const a = S.byName[name];
+    if (!a) return 'That bot isn’t on the computer any more.';
+    const j = a.job;
+    const wasPaused = !!(j && j.paused);
+    if (j) { j.paused = false; j.stopped = true; if (!j.endedAt) j.endedAt = Date.now(); }
+    if (wasPaused) { const dm = chatById('dm:' + name); if (dm) addMessage(dm, { who: APP, kind: 'event', text: '⏹ Stopped ' + name + '’s paused job from the phone.' }); }
+    else stopAgentNow(name);
+    renderTeamSoon();
+    return true;
+  }
+  function phonePauseJob(name, on) {
+    const a = S.byName[name], dm = chatById('dm:' + name);
+    if (!a || !dm) return 'That bot isn’t on the computer any more.';
+    if (on) {
+      if (!a.job) a.job = { chat: dm.id, title: a.activity || 'Working', from: '', startedAt: Date.now(), endedAt: 0, paused: false, stopped: false };
+      a.job.paused = true;
+      stopAgentNow(name);
+      addMessage(dm, { who: APP, kind: 'event', text: '⏸ Paused ' + name + ' from the phone. Nothing nudges it until you resume it there or write to it here.' });
+    } else {
+      const j = a.job;
+      if (!j || !j.paused) return true;
+      if (!mirrorFor(dm) && S.flows[dm.id]) return 'It’s busy in that chat right now. Try again in a moment.';
+      j.paused = false; j.chat = dm.id; j.endedAt = Date.now();   // the resume note below carries the same job on, in the bot's own chat
+      driveOf(name).held = false;   // (Stop held the To do drive)
+      const note = 'Storm paused your job ("' + j.title + '") from his phone and has now resumed it. Carry on from where you stopped.';
+      if (mirrorFor(dm)) sendToMirror(dm, note, [], [], APP + ' (resume): ');
+      else continueLocal(dm, note);
+    }
+    renderTeamSoon();
+    return true;
   }
 
   // ---------- resizable sidebars: drag the inner edge of the team column or the right pane; double-click puts it back ----------

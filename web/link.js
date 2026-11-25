@@ -114,6 +114,9 @@
     if (routines) state.routines = routines;
     // Squall's own version, for the phone's Settings > Computer (only what the updater really knows)
     const d = view && view.desktop;
+    // the jobs the bots are on right now (and ones that ended a few minutes ago), for the phone's Live work screens
+    const work = phoneWork(view && view.work, idOf);
+    if (work.length) state.work = work;
     if (d && d.current) {
       state.desktop = { version: String(d.current), updating: !!d.busy };
       if (d.ready) state.desktop.latest = String(d.ready);
@@ -334,6 +337,23 @@
         const c = chatFor(view, a.chatId);
         return c ? { do: 'read', chat: c } : { do: 'none' };
       }
+      case 'work.stop': case 'work.pause': case 'work.note': {
+        // the phone's Live work: Stop, Pause / Resume, and a note to the bot doing the job
+        const w = workFor(view, a.workId);
+        const running = w && ['working', 'waiting', 'paused'].includes(w.job.state);
+        if (type === 'work.note') {
+          const text = String(a.text || '').trim();
+          if (!text) return { error: 'There’s nothing to send.' };
+          const c = w && chatFor(view, w.botId);
+          if (!c) return { error: 'That job has finished.' };
+          return { do: 'send', chat: c, text: text.slice(0, 20000) };
+        }
+        if (!running) return { error: 'That job has already finished.' };
+        if (type === 'work.stop') return { do: 'workStop', name: w.name };
+        if (typeof a.paused !== 'boolean') return { error: 'Pause has to be on or off.' };
+        if (a.paused === (w.job.state === 'paused')) return { do: 'none' };
+        return { do: 'workPause', name: w.name, paused: a.paused };
+      }
       case 'chat.clear': {
         const c = chatFor(view, a.chatId);
         return c ? { do: 'clear', chat: c } : { do: 'none' };
@@ -480,6 +500,76 @@
     return t;
   }
 
+  // ---------------------------------------------------------------- live work
+
+  const WORK_STATES = ['working', 'waiting', 'paused', 'done', 'stopped'];
+  const EDIT_TOOLS = { Edit: 'Edited', MultiEdit: 'Edited', NotebookEdit: 'Edited', Write: 'Wrote' };
+  const MAX_WORK = 8, MAX_STEPS = 14, MAX_TERMINAL = 40, MAX_OUT = 8, MAX_FILES = 20;
+
+  // A job's id for the phone: one per bot, so the screen the phone has open follows the bot from turn to turn.
+  const workIdOf = botId => 'work-' + botId;
+
+  // A tool's output as terminal lines: the last few non-empty lines, as an error when the tool failed.
+  function outLines(out, failed) {
+    const lines = String(out || '').replace(/\r/g, '').split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+    const kept = lines.slice(-MAX_OUT).map(l => ({ text: l.length > 300 ? l.slice(0, 299) + '…' : l, kind: failed ? 'err' : 'dim' }));
+    if (lines.length > MAX_OUT) kept.unshift({ text: '… ' + (lines.length - MAX_OUT) + ' more line' + (lines.length - MAX_OUT === 1 ? '' : 's'), kind: 'dim' });
+    return kept;
+  }
+
+  // jobs: [{ name, title, from, state, startedAt (ms), now, askId, tools: [{ title, name, status: running|ok|error, command, out, file }] }]
+  // (what app.js gives, from Squall's real runs). Returns the phone's `work` list: steps are the tools the bot used, the terminal is its
+  // shell commands and their output, files are the files it wrote or edited. Nothing is made up: a job Squall can't see inside (a live
+  // session) has no steps, only what it's doing now.
+  function phoneWork(jobs, idOf) {
+    if (!Array.isArray(jobs)) return [];
+    const out = [];
+    for (const j of jobs) {
+      const botId = j && idOf(j.name);
+      if (!botId || out.some(w => w.botId === botId)) continue;
+      const state = WORK_STATES.includes(j.state) ? j.state : 'working';
+      const ended = state === 'done' || state === 'stopped';
+      const tools = (Array.isArray(j.tools) ? j.tools : []).filter(t => t && t.title);
+      const steps = tools.slice(-MAX_STEPS).map(t => {
+        const failed = t.status === 'error';
+        const lines = [];
+        if (t.command) lines.push({ text: '$ ' + String(t.command).slice(0, 300), kind: 'cmd' });
+        lines.push(...outLines(t.out, failed));
+        if (failed && !t.out) lines.push({ text: 'That step failed.', kind: 'err' });
+        return { title: String(t.title).slice(0, 120), state: t.status === 'running' && !ended ? 'now' : 'done', lines };
+      });
+      let terminal = [];
+      for (const t of tools) if (t.command) terminal.push({ text: '$ ' + String(t.command).slice(0, 300), kind: 'cmd' }, ...outLines(t.out, t.status === 'error'));
+      terminal = terminal.slice(-MAX_TERMINAL);
+      const files = [];
+      for (const t of tools) {
+        if (!t.file || !EDIT_TOOLS[t.name]) continue;
+        const path = String(t.file);
+        const i = files.findIndex(f => f.path === path);
+        if (i >= 0) files.splice(i, 1);
+        files.push({ path, change: EDIT_TOOLS[t.name], edited: t.status === 'ok' });
+      }
+      const w = { id: workIdOf(botId), botId, title: String(j.title || 'Working').trim().slice(0, 120) || 'Working', from: String(j.from || ''), state, now: String(j.now || '').slice(0, 200), steps, terminal, files: files.slice(-MAX_FILES) };
+      const at = j.startedAt ? new Date(j.startedAt) : null;
+      if (at && !isNaN(at)) w.startedAt = at.toISOString();
+      if (state === 'waiting' && j.askId) w.askId = String(j.askId);
+      out.push(w);
+      if (out.length >= MAX_WORK) break;
+    }
+    // running jobs first, then the ones that just ended
+    return out.sort((x, y) => (['done', 'stopped'].includes(x.state)) - (['done', 'stopped'].includes(y.state)));
+  }
+
+  // The bot's name for a job id from the phone, and the job itself, or null when it has gone.
+  function workFor(view, workId) {
+    const agents = (view && view.agents) || [];
+    const leadName = view && view.lead ? view.lead : (agents.find(a => a.lead) || agents[0] || {}).name;
+    const ids = botIds(agents, leadName);
+    const name = Object.keys(ids).find(n => workIdOf(ids[n]) === workId);
+    const job = name && ((view && view.work) || []).find(j => j && j.name === name);
+    return job ? { name, botId: ids[name], job } : null;
+  }
+
   // ---------------------------------------------------------------- the window
 
   function wire(h) {
@@ -505,6 +595,7 @@
           messages: h.phoneMessages(c), typing: h.typingIn(c), raw: c,
         })),
         approvals,
+        work: h.work ? h.work.list() : undefined,
         desktop: status.update || null,
         todo: h.todo ? h.todo.items() : undefined,
         usage: h.usage ? h.usage() : null,
@@ -541,6 +632,13 @@
       switch (r.do) {
         case 'send': return h.send(chat, r.text, false) ? { ok: true } : { ok: false, error: 'Squall couldn’t send that. Is it signed in to Claude?' };
         case 'read': h.markRead(chat); return { ok: true };
+        case 'workStop': case 'workPause': {
+          if (!h.work) return { ok: false, error: CANT };
+          const res = r.do === 'workStop' ? h.work.stop(r.name) : h.work.pause(r.name, r.paused);
+          if (res !== true) return { ok: false, error: typeof res === 'string' ? res : 'Squall couldn’t do that just now.' };
+          await pushNow();
+          return { ok: true };
+        }
         case 'clear': h.clear(chat); return { ok: true };
         case 'clearAll': (S.chats || []).forEach(c => h.clear(c)); return { ok: true };
         case 'teamPause': {
