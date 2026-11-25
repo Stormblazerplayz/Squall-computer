@@ -328,7 +328,7 @@ namespace Squall.Link.Tests
             Assert.Equal("Pick a number from 10 to 300.", (string?)(await rig.Do("{\"op\":\"setMaxSteps\",\"value\":5}"))["error"]);
             var set = await rig.Do("{\"op\":\"setMaxSteps\",\"value\":10}");
             Assert.Equal(10, (int)set["settings"]!["maxSteps"]!);
-            for (int i = 0; i < 12; i++) rig.Model.Reply("tool_use", FakeModel.Tool("t" + i, "wait", "{\"duration\":0.01}"));
+            for (int i = 0; i < 10; i++) rig.Model.Reply("tool_use", FakeModel.Tool("t" + i, "wait", "{\"duration\":0.01}"));
             string sid = await rig.Start();
             await rig.Hub.RunTask(sid);
             var s = await rig.Session(sid);
@@ -339,8 +339,9 @@ namespace Squall.Link.Tests
             // carrying on answers the last tool_use first
             rig.Model.Reply("end_turn", FakeModel.Text("Finished."));
             Assert.True((bool)(await rig.Do("{\"op\":\"message\",\"sessionId\":\"" + sid + "\",\"text\":\"keep going\"}"))["ok"]!);
-            await Wait.Until(() => rig.Model.Count == 11, "the follow-up call");
+            await Wait.Until(() => rig.Model.Count >= 11, "the follow-up call");
             await rig.Hub.RunTask(sid);
+            Assert.Equal(11, rig.Model.Count);
             var last = rig.Model.Request(10);
             var tail = Content(last, last.Count - 1);
             Assert.Equal(new[] { "tool_result", "text" }, tail.Select(b => (string)b!["type"]!));
