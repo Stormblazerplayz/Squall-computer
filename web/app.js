@@ -2107,18 +2107,34 @@
     if (mi) {
       const out = [];
       mi.entries.forEach((e, i) => {
-        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || '') });
+        if (e.role === 'assistant' || e.role === 'user') out.push({ id: 'e' + i, who: e.role === 'assistant' ? c.members[0] : 'Storm', kind: 'msg', text: String(e.text || ''), summary: e.role === 'assistant' ? (SUMS['e:' + e.k] || {}).text : undefined });
         else if (e.role === 'peer' && APP_NAME_RX.test(e.from || '') && !SQ_NOTE_RX.test(e.text || ''))
           out.push({ id: 'e' + i, who: 'Storm', kind: 'msg', text: stripBotOnly(String(e.text || '').replace(VIA_RX, '').replace(/\n\nHe[’']s watching this session live[\s\S]*$/, '')) });
       });
       return out;
     }
-    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time }));
+    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time, photos: (m.images || []).length || undefined, summary: m.kind === 'agent' ? (m.summary || (SUMS['m:' + m.id] || {}).text) : undefined }));
   }
   function linkTyping(c) {
     const mi = c.kind === 'dm' ? mirrorFor(c) : null;
     return [...new Set(Object.keys(S.typing[c.id] || {}).concat(mi && mirrorBusy(mi, false) ? [c.members[0]] : []))];
   }
+  // photos sent from the phone (link.js photoDo): the same as pasting them into chat c and sending, without moving the PC there
+  function linkSendPhotos(c, text, saved) {
+    const input = $('#input');
+    const keep = { active: S.active, split: S.split, right: S.focusRight, draft: input.value, attach: S.attach };
+    S.active = c.id; S.split = null; S.focusRight = false; S.attach = saved.slice();
+    input.value = text || '';
+    try { send(); } catch (e) { Bridge.call('log', { level: 'error', msg: 'phone photo: ' + (e && e.stack || e) }).catch(() => { }); }
+    const sent = S.attach.length === 0;   // send() empties the attachments when it takes the message
+    S.active = keep.active; S.split = keep.split; S.focusRight = keep.right; S.attach = keep.attach;
+    input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
+    return sent;
+  }
+  window.SquallPhotoOps = {
+    save: (data, type, name) => Bridge.call('saveImage', { data, type, name }),
+    send: (c, text, saved) => linkSendPhotos(c, text, saved),
+  };
   // sends text into chat c as Storm, the same as typing it there, without moving the PC to that chat; true when it went (or queued)
   function linkSend(c, text, call) {
     const input = $('#input');
@@ -5049,6 +5065,102 @@
     noteTeamChange(r.name + ' was removed from the team.');
     teamChanged();
   }
+  // Manage teammate on the phone (squall-computer docs/phone-teammates.md): rename, chief on or off and remove, with the same checks as
+  // the right-click menu here. A rename or a remove reloads the window like New teammate from the phone does: a moment later, so the
+  // phone hears back first. link.js reads these through window.SquallTeamOps
+  function phoneTeamBot(name) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const chat = chatById('dm:' + a.name);
+    if (agentBusy(a) || a.waking || (chat && S.flows[chat.id])) throw new Error(a.name + ' is working right now. Try again when it’s done.');
+    return a;
+  }
+  async function phoneRenameBot(from, to) {
+    const a = phoneTeamBot(from);
+    to = String(to || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9]{1,19}$/.test(to)) throw new Error('Use a short name: letters and digits, starting with a letter (2 to 20 characters).');
+    if (to === a.name) return a.name;
+    if (S.agents.some(x => x !== a && x.name.toLowerCase() === to.toLowerCase())) throw new Error(to + ' is already on the team.');
+    const r = await Bridge.call('teamRename', { from: a.name, to, byBot: false });
+    migrateRename(a.name, r.name);
+    if (S.teamNews && S.teamNews[a.name]) { S.teamNews[r.name] = S.teamNews[a.name]; delete S.teamNews[a.name]; }
+    noteTeamChange(a.name + ' was renamed to ' + r.name + ' (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneRemoveBot(name) {
+    const a = phoneTeamBot(name);
+    if (a.lead && S.agents.filter(x => x.lead).length <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamRemove', { name: a.name });
+    migrateRemove(r.name);
+    if (S.teamNews) delete S.teamNews[r.name];
+    noteTeamChange(r.name + ' was removed from the team (on the phone).');
+    await saveNow();
+    await refreshTeamModel();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return r.name;
+  }
+  async function phoneSetChief(name, on) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    if (!!a.lead === !!on) return !!a.lead;
+    const chiefs = S.agents.filter(x => x.lead).length;
+    if (on && chiefs >= 4) throw new Error('The team already has 4 chiefs. Take one off first.');
+    if (!on && chiefs <= 1) throw new Error(a.name + ' is the only chief. Make someone else chief first.');
+    const r = await Bridge.call('teamChief', { name: a.name, chief: !!on });
+    a.lead = !!r.lead;
+    S.chiefs = S.agents.filter(x => x.lead);
+    S.lead = S.chiefs[0] || S.lead;
+    for (const c of S.chats) if (c.kind === 'group') { const ch = S.chiefs.find(x => c.members.includes(x.name)); c.lead = ch ? ch.name : c.members[0]; }
+    renderTeam(); renderChatHead();
+    teamNote(chatById('team'), a.name + (a.lead ? ' is now a chief (from the phone).' : ' is no longer a chief (from the phone).'));
+    noteTeamChange(a.name + (a.lead ? ' was promoted to chief.' : ' is no longer a chief.'));
+    saveSoon();
+    return a.lead;
+  }
+  // the project a teammate works in (the right-click Project picker): the folders under Documents\Projects, and the pick saved to team.json
+  async function phoneProjects() {
+    const r = await Bridge.call('projectList', {});
+    return ((r && r.projects) || []).filter(p => p && p.name && p.path).map(p => ({ name: String(p.name), path: String(p.path) }));
+  }
+  async function phoneSetFolder(name, path) {
+    const a = S.byName[name];
+    if (!a) throw new Error(name + ' isn’t on the team any more.');
+    const res = await Bridge.call('teamSetFlag', { name: a.name, key: 'folder', value: path || null });
+    a.folder = (res && res.value) || '';
+    renderTeamSoon();
+    const where = a.folder ? String(a.folder).split(/[\\/]/).filter(Boolean).pop() : '';
+    teamNote(chatById('team'), a.name + (where ? ' now works in ' + where : ' works across all of Projects again') + ' from its next run (set on the phone).');
+    saveSoon();
+    return a.folder;
+  }
+  window.SquallTeamOps = { rename: phoneRenameBot, remove: phoneRemoveBot, chief: phoneSetChief, projects: phoneProjects, setFolder: phoneSetFolder };
+  // Add teammate from the phone (squall-computer docs/phone-add-teammate.md): the same as Bring to life in Add teammate here
+  async function phoneAddBot(name, role, color, prompt) {
+    name = String(name || '').trim();
+    const bad = botNameProblem(name);
+    if (bad) throw new Error(bad);
+    await Bridge.call('teamAdd', { name, role: String(role || ''), color, prompt: String(prompt || '') });
+    noteTeamChange(name + ' joined the team (added on the phone).', true);
+    S.born = { name, until: Date.now() + 2600 }; sfx('born');
+    await saveNow();
+    await refreshTeamModel();
+    greetNewBot(name, String(role || ''), 'Storm', String(prompt || '')).catch(() => { });
+    await saveNow();
+    if (!S.selftest) setTimeout(needReload, 1500);
+    return name;
+  }
+  window.SquallAddOps = { add: phoneAddBot, presets: () => BOT_PRESETS.map(p => ({ id: p.id, label: p.label, role: p.role, brief: p.brief, color: p.color })) };
+  // the Obsidian vault on the phone (squall-computer docs/phone-notes.md): the same search, read and add-a-line as the vault window here.
+  // Nothing is removed or overwritten
+  window.SquallNotesOps = {
+    search: q => Bridge.call('vaultSearch', { query: q }),
+    read: path => Bridge.call('vaultRead', { path }),
+    append: (path, text) => Bridge.call('vaultAppend', { path, text }),
+    list: async () => { const d = await Bridge.call('vaultGraph'); return (d && d.nodes) || []; },
+  };
   // keep the chats, sessions and timers that belong to a renamed or deleted bot in step with team.json
   function migrateRename(from, to) {
     for (const c of S.chats) {
@@ -6036,6 +6148,57 @@
     S.model = id; S.modelPicked = true; saveSoon(); renderModelChip(); closeModelMenu();
     Bridge.call('setModel', { model: id }).catch(() => {});
   }
+  // the phone's model picker (link.js withModels / modelDo)
+  window.SquallModelOps = {
+    list: () => MODELS.map(m => ({ id: m.id, name: m.name, note: m.note })),
+    current: () => S.model,
+    set: id => setModel(id),
+  };
+  // the phone's work timers (link.js withTimers / timerDo): the same as the timer dial's Done, in any chat
+  window.SquallTimerOps = {
+    list: () => Object.keys(S.timers).filter(id => S.timers[id]).map(id => {
+      const t = S.timers[id];
+      return { chatId: id, until: t.until === Infinity ? null : t.until, mins: t.mins, startedAt: t.startedAt, paused: !!t.paused };
+    }),
+    workFor: () => S.workFor,
+    start: (c, v) => {
+      startTimer(c, v);
+      const t = S.timers[c.id];
+      if (!t) return false;
+      const mi = mirrorFor(c);
+      const busy = mi ? mirrorBusy(mi) : !!S.flows[c.id];
+      const pendingNow = !!mi && (mi.pending || []).some(p => Date.now() - p.at < 60000);
+      addMessage(c, { who: APP, kind: 'event', text: '⏱ Work timer started from the phone: ' + (v === 'inf' ? 'Continuous' : v >= 60 && v % 60 === 0 ? v / 60 + ' h' : v + ' min') + '.' });
+      if (!busy && !pendingNow) timerTick(c.id);   // idle now: the first nudge goes out right away
+      else t.busySeen = true;                       // busy now: the watch nudges when it finishes
+      return true;
+    },
+    stop: c => { if (!S.timers[c.id]) return false; stopTimer(c.id); return true; },
+  };
+  // Summaries and Catch up from the phone (docs/phone-summaries.md): the same Haiku summary as the Summary button under a message.
+  // A message's summary the phone asked for shows under it on the computer too.
+  window.SquallSummaryOps = {
+    summarize: text => Bridge.call('summarize', { text }),
+    save: (c, id, s) => {
+      if (!c || !s) return;
+      const m = (c.messages || []).find(x => x.id === id);
+      if (m) {
+        if (m.kind !== 'agent' || m.summary) return;
+        m.summary = s; msgCache.delete(m); saveSoon();
+      } else {
+        const mi = c.kind === 'dm' ? mirrorFor(c) : null, e = mi && /^e\d+$/.test(String(id)) ? mi.entries[+String(id).slice(1)] : null;
+        if (!e || e.role !== 'assistant') return;
+        SUMS['e:' + e.k] = { text: s }; entryHTML.delete(e);
+      }
+      if (activeChat() === c) renderChat();
+    },
+  };
+
+  // Shared clipboard from the phone (docs/phone-clipboard.md): text only, and only when the phone asks.
+  window.SquallClipOps = {
+    read: () => Bridge.call('clipboardRead', {}),
+    write: text => Bridge.call('clipboardWrite', { text: String(text || '') }).then(() => true),
+  };
 
   function startTimer(chat, forced) {
     const v = forced || S.workFor;
