@@ -46,3 +46,28 @@ test('long commands are cut to one short line', () => {
   assert.equal(line.length, 122);
   assert.ok(line.startsWith('$ echo ') && line.endsWith('…'));
 });
+
+test('a live Claude app session sends its steps from liveSteps', () => {
+  const sage = { name: 'Sage', role: 'Coder', color: '#22C55E', status: 'idle', activity: 'Editing: app.js', turns: [] };
+  Object.defineProperty(sage, 'liveSteps', {
+    value: [
+      { name: 'Read', detail: 'C:\\proj\\web\\link.js' }, { name: 'Bash', detail: 'node --test tests/web' }, { name: 'Edit', detail: '/home/x/app.js' },
+      { name: 'Grep', detail: 'phoneBotLog' }, { name: 'WebFetch', detail: 'https://example.com/docs' }, { name: 'Task', detail: 'Check the tests' },
+      { name: 'mcp__claude-in-chrome__navigate', detail: '' }, { name: 'Glob', detail: '' },
+    ], enumerable: false,
+  });
+  const chats = [{ id: 'dm:Sage', kind: 'dm', members: ['Sage'], unread: 0, typing: ['Sage'], messages: [] }];
+  const bots = L.buildState(view([{ name: 'Nova', lead: true, status: 'idle' }, sage], { chats })).bots;
+  const b = bots.find(x => x.name === 'Sage');
+  assert.equal(b.status, 'working');
+  assert.deepEqual(b.log, ['Edited app.js', 'Searched for phoneBotLog', 'Opened example.com', 'Started a helper: Check the tests', 'Used navigate', 'Searched the files']);
+  assert.equal(JSON.stringify(sage).includes('liveSteps'), false);   // never saved with the team
+});
+
+test('Squall run steps win over a stale liveSteps, and an idle live session sends none', () => {
+  const a = { name: 'Sage', status: 'working', turns: [{ text: '', tools: [tool('Read', { file_path: 'a.txt' })] }], liveSteps: [{ name: 'Bash', detail: 'ls' }] };
+  const b = { name: 'Rex', status: 'idle', turns: [], liveSteps: [{ name: 'Bash', detail: 'ls' }] };
+  const bots = L.buildState(view([{ name: 'Nova', lead: true, status: 'idle' }, a, b])).bots;
+  assert.deepEqual(bots.find(x => x.name === 'Sage').log, ['Read a.txt']);
+  assert.equal('log' in bots.find(x => x.name === 'Rex'), false);
+});

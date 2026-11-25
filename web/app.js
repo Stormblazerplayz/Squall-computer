@@ -832,7 +832,7 @@
     settlePending(mi, fresh);
     noteCompactions(m.agent, fresh, !!m.reset);
     const a = S.byName[m.agent];
-    if (a) a.activity = mirrorActivity(mi);
+    if (a) { a.activity = mirrorActivity(mi); setLiveSteps(a, mi); }
     // a session just stopped to ask Storm something: flash the taskbar button and say so in the title
     // a real session that just finished its turn: the work timer may tell it to keep going
     const busyNow = mirrorBusy(mi, false);
@@ -1043,6 +1043,18 @@
     const last = (mi.entries || [])[(mi.entries || []).length - 1];
     if (last && last.role === 'thought') { const t = String(last.text || '').replace(/\s+/g, ' ').trim(); return 'Writing… ' + (t.length > 140 ? t.slice(0, 139) + '…' : t); }
     return 'Thinking…';
+  }
+  // The steps of the turn a live session is on now (its tool calls since Storm's or another Claude's last message), for the phone's
+  // Board and Mission control (link.js phoneBotLog). Kept off the saved team file: not enumerable, so JSON.stringify skips it
+  function setLiveSteps(a, mi) {
+    const es = mi.entries || [], out = [];
+    for (let i = es.length - 1; i >= 0 && out.length < 12; i--) {
+      const e = es[i];
+      if (e.role === 'user' || e.role === 'peer') break;
+      if (e.role === 'tool' && e.name) out.push({ name: String(e.name), detail: String(e.detail || '') });
+    }
+    out.reverse();
+    try { Object.defineProperty(a, 'liveSteps', { value: out, writable: true, configurable: true, enumerable: false }); } catch (e) { }
   }
   // the session is stopped on a question or a plan only Storm can answer
   const mirrorNeedsYou = mi => mirrorBusy(mi) && !!mi.status && (mi.status.tool === 'AskUserQuestion' || mi.status.tool === 'ExitPlanMode');
