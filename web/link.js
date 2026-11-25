@@ -99,6 +99,9 @@
     });
 
     const state = { typing, bots, chats, groups, inbox };
+    // the plan's usage and today's jobs, for the phone's Plan usage screen (only when Squall has it)
+    const usage = phoneUsage(view && view.usage, idOf, view && view.now);
+    if (usage) state.usage = usage;
     // Squall's own version, for the phone's Settings > Computer (only what the updater really knows)
     const d = view && view.desktop;
     if (d && d.current) {
@@ -107,6 +110,69 @@
     }
     state.version = hash(JSON.stringify(state));
     return state;
+  }
+
+  // ---------------------------------------------------------------- plan usage
+
+  const iso = ms => { const d = new Date(ms); return isNaN(d) ? null : d.toISOString(); };
+  const pct = n => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
+
+  // A window's id for the phone: the 5-hour window is "five_hour", the all-models week is "week", any other week "week-<slug>".
+  function windowId(label) {
+    const l = String(label || '').toLowerCase();
+    if (/5-hour|5 hour|five/.test(l)) return 'five_hour';
+    if (/week/.test(l)) {
+      const rest = l.replace(/^weekly\s*·?\s*/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      return !rest || rest === 'all-models' ? 'week' : 'week-' + rest;
+    }
+    return l.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'window';
+  }
+
+  // u: what app.js reads (usageForPhone): { windows: [{ label, percentUsed, resetsAt }], five, week (each { label, ready, atReset, outAt }),
+  // throttleOn, limit, why, readAt, overage,
+  // today: { day, bots: { name: { jobs, ms } } } }. Returns state.usage, or null when there's nothing to show. Nothing is guessed: a window's
+  // prediction is there only when Squall has enough readings, and today's jobs are the runs Squall timed itself.
+  function phoneUsage(u, idOf, now) {
+    if (!u || typeof u !== 'object') return null;
+    const at = Number(now) || Date.now();
+    const used = new Set();
+    const windows = (Array.isArray(u.windows) ? u.windows : []).filter(w => w && w.label).map(w => {
+      let id = windowId(w.label), n = 2;
+      while (used.has(id)) id = windowId(w.label) + '-' + n++;
+      used.add(id);
+      const out = { id, label: String(w.label).slice(0, 60), percent: pct(w.percentUsed) };
+      const reset = w.resetsAt ? Date.parse(w.resetsAt) : NaN;
+      if (!isNaN(reset)) out.resetsAt = iso(reset);
+      // the predictions app.js made for the 5-hour window (five) and the all-models week (week)
+      const p = id === 'five_hour' ? u.five : id === 'week' ? u.week : null;
+      if (p && p.label && windowId(p.label) === id) {
+        out.predicting = !p.ready;
+        if (p.ready && typeof p.atReset === 'number') out.atReset = pct(p.atReset);
+        const outAt = Number(p.outAt);
+        if (p.ready && p.outAt != null && isFinite(outAt) && outAt > 0) out.runsOutAt = iso(Math.max(Math.round(at / 60000) * 60000, Math.round(outAt / 60000) * 60000));
+      }
+      return out;
+    });
+    const limit = Number.isInteger(u.limit) && u.limit >= 10 && u.limit <= 100 ? u.limit : null;
+    const why = u.why === 'pace' || u.why === 'limit' ? u.why : null;
+    const out = { windows, slowDown: u.throttleOn !== false, limit, throttled: !!why };
+    if (why) out.why = why;
+    if (u.readAt) { const r = iso(u.readAt); if (r) out.readAt = r; }
+    if (u.overage) out.overage = true;
+    const t = u.today;
+    if (t && typeof t.day === 'string' && t.bots && typeof t.bots === 'object') {
+      const bots = [];
+      for (const name of Object.keys(t.bots)) {
+        const id = idOf(name), b = t.bots[name];
+        if (!id || !b || typeof b !== 'object') continue;   // a bot that's gone from the team
+        const jobs = Math.max(0, Math.floor(Number(b.jobs) || 0));
+        if (!jobs) continue;
+        bots.push({ botId: id, jobs, seconds: Math.max(0, Math.round((Number(b.ms) || 0) / 1000)) });
+      }
+      bots.sort((x, y) => y.seconds - x.seconds || y.jobs - x.jobs);
+      out.today = { day: t.day, bots };
+    }
+    return out;
   }
 
   function toolWords(tool) {
@@ -192,6 +258,24 @@
         return { do: 'group', name: String(a.name || '').trim().slice(0, 60), members: names };
       }
       case 'settings.save': return { do: 'none' };
+      case 'usage.settings': {
+        // the phone's Plan usage screen: { throttle: true/false } and/or { limit: 10 to 100, or null for none }
+        const out = { do: 'usage' };
+        if ('throttle' in a) {
+          if (typeof a.throttle !== 'boolean') return { error: 'Slow down has to be on or off.' };
+          out.throttle = a.throttle;
+        }
+        if ('limit' in a) {
+          if (a.limit === null) out.limit = null;
+          else {
+            const n = Number(a.limit);
+            if (!Number.isInteger(n) || n < 10 || n > 100) return { error: 'Pick a limit from 10% to 100%.' };
+            out.limit = n;
+          }
+        }
+        if (!('throttle' in out) && !('limit' in out)) return { error: 'There’s nothing to change.' };
+        return out;
+      }
       default: return { error: CANT };
     }
   }
@@ -239,6 +323,8 @@
         })),
         approvals,
         desktop: status.update || null,
+        usage: h.usage ? h.usage() : null,
+        now: Date.now(),
       };
     }
 
@@ -251,6 +337,11 @@
       h.Bridge.call('link', { do: 'state', data }).catch(() => { }).finally(() => { sending = false; });
     }
     setInterval(push, 2000);
+    // sends the newest state right away and waits for the host to have it, so the phone's next read already shows a change
+    async function pushNow() {
+      if (!status.running) return;
+      try { await h.Bridge.call('link', { do: 'state', data: buildState(view()) }); } catch (e) { }
+    }
 
     function answer(rid, result) {
       if (rid) h.Bridge.call('link', { do: 'answer', rid, result }).catch(() => { });
@@ -271,6 +362,15 @@
           return res && res.ok ? { ok: true } : { ok: false, error: 'That question had already gone on the computer.' };
         }
         case 'group': { const c = h.group(r.name, r.members); return c ? { ok: true, id: c.id } : { ok: false, error: 'Couldn’t make that group.' }; }
+        case 'usage': {
+          if (!h.setUsage) return { ok: false, error: CANT };
+          const change = {};
+          if ('throttle' in r) change.throttle = r.throttle;
+          if ('limit' in r) change.limit = r.limit;
+          h.setUsage(change);
+          await pushNow();
+          return { ok: true };
+        }
         default: push(); return { ok: true };
       }
     }
@@ -432,7 +532,7 @@
     root.SquallLinkUI = { settingsHTML, onSettings, openPair, refresh, push };
   }
 
-  const api = { CHIEF, botIds, hash, buildState, phoneMessages, routeAction, chatFor, speakable, wire };
+  const api = { CHIEF, botIds, hash, buildState, phoneMessages, phoneUsage, windowId, routeAction, chatFor, speakable, wire };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SquallLinkCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -30,3 +30,13 @@ How to wire both into `Squall.exe`, and how to make a release, is in [`docs/desk
 
 **The older phone web page** (Settings, Phone, Turn on) still works the same way: the PC's address and a 6-digit code
 for `web/mobile.html`.
+
+## Plan usage on the phone
+
+The usage chip under the send bar (your plan's 5-hour and weekly windows, read from Claude) also goes to the phone, in
+`state.usage` (see `web/link.js`, `phoneUsage`). The phone's **Plan usage** screen shows each window, when it resets, where
+the pace lands, and the jobs each bot did today (Squall times its own runs, from start to finish).
+
+Both the phone and the usage menu have **Slow the team down to save usage** (the throttle: short turns, no waking sleeping bots,
+fewer timer nudges) and **Also slow down at** a percent of the 5-hour window. Once set, the switch wins over `team.json`'s
+`throttle`. The phone changes them with the `usage.settings` action (`{"throttle": true}` or `{"limit": 80}` / `{"limit": null}`).
