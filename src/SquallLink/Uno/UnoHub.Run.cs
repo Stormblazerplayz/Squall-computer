@@ -28,6 +28,9 @@ namespace Squall.Link.Uno
             public readonly List<string> YouDid = new();
             public CancellationTokenSource Cts = new();
             public TaskCompletionSource HandBack = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            /// <summary>The user paused it: it waits before its next model call until resumed (stays true while they have the wheel).</summary>
+            public bool Paused;
+            public TaskCompletionSource Resumed = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public Task Task = Task.CompletedTask;
             public DateTimeOffset Touched;
         }
@@ -56,6 +59,9 @@ namespace Squall.Link.Uno
                 cts = run.Cts;
                 run.HandBack.TrySetResult();
                 run.HandBack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                run.Paused = false;
+                run.Resumed.TrySetResult();
+                run.Resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 run.Touched = _clock();
                 run.Task = Task.Run(() => RunLoopAsync(run, cts.Token), CancellationToken.None);
             }
@@ -100,7 +106,7 @@ namespace Squall.Link.Uno
                 while (true)
                 {
                     ct.ThrowIfCancellationRequested();
-                    await WaitWhileYouAsync(run, ct).ConfigureAwait(false);
+                    if (!await WaitWhileHeldAsync(run, ct).ConfigureAwait(false)) return;   // stopped while held
                     if (!resume)
                     {
                         List<ContentBlockParam> blocks;
@@ -299,15 +305,20 @@ namespace Squall.Link.Uno
             }
         }
 
-        private async Task WaitWhileYouAsync(Run run, CancellationToken ct)
+        /// <summary>
+        /// Waits while the user has the wheel ("you") or paused it ("paused"). No model calls, so no tokens, meanwhile.
+        /// Returns false when the session ended meanwhile (Stop wakes it before cancelling), so no model call starts.
+        /// </summary>
+        private async Task<bool> WaitWhileHeldAsync(Run run, CancellationToken ct)
         {
             while (true)
             {
                 Task wait;
                 lock (_lock)
                 {
-                    if (run.S.State != "you") return;
-                    wait = run.HandBack.Task;
+                    if (run.S.State == "you") wait = run.HandBack.Task;
+                    else if (run.S.State == "paused") wait = run.Resumed.Task;
+                    else return run.S.Active;
                 }
                 await wait.WaitAsync(ct).ConfigureAwait(false);
             }
@@ -317,7 +328,7 @@ namespace Squall.Link.Uno
         {
             lock (_lock)
             {
-                if (s.State == "you") return;
+                if (s.State is "you" or "paused") return;
                 s.Now = now;
             }
             RaiseChanged();
@@ -336,6 +347,8 @@ namespace Squall.Link.Uno
                 s.Error = error;
                 s.Now = now;
                 run.HandBack.TrySetResult();
+                run.Paused = false;
+                run.Resumed.TrySetResult();
                 var computer = _store.Computers.FirstOrDefault(c => c.Id == s.ComputerId);
                 if (computer != null && computer.SessionId == s.Id) computer.SessionId = null;
                 run.Touched = _clock();
@@ -372,11 +385,16 @@ namespace Squall.Link.Uno
             {
                 foreach (var c in calls)
                 {
-                    bool you;
-                    lock (_lock) you = run.S.State == "you";
-                    if (you)
+                    string state;
+                    lock (_lock) state = run.S.State;
+                    if (state == "you")
                     {
                         results.Add(Error(c, "Not done: the user took over the computer before this step. Take a screenshot when you have it back."));
+                        continue;
+                    }
+                    if (state == "paused")
+                    {
+                        results.Add(Error(c, "Not done: the user paused you before this step. Take a screenshot when you carry on."));
                         continue;
                     }
                     results.Add(await RunToolAsync(run, c, ct).ConfigureAwait(false));
@@ -447,7 +465,7 @@ namespace Squall.Link.Uno
                         result = Text(c, "OK");
                         break;
                 }
-                lock (_lock) if (s.State != "you") s.Now = done;
+                lock (_lock) if (s.State is not ("you" or "paused")) s.Now = done;
                 LogRaw(s.Id, cid, "uno", ComputerActions.Kind(a), done, ex, ey, a.X2 ?? a.Region?.X1, a.Y2 ?? a.Region?.Y1, step);
                 return result;
             }

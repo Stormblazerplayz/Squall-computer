@@ -4,7 +4,7 @@
 // Linux computer in Docker on this PC. This file is the window's half:
 //   - a "Squall Uno" section in the left sidebar, under the team chats: one row per agent's computer, with a live dot;
 //   - the Squall Uno view in the middle: the live screen (frames pushed by the host), what it is doing now, what it did,
-//     a task box, Stop / Stop everything / Take the wheel, and Squall Uno's settings (API key, max steps, Docker).
+//     a task box, Pause / Resume, Stop / Stop everything / Take the wheel, and Squall Uno's settings (API key, max steps, Docker).
 // Everything shown comes from the host (ops through Bridge.call('link', { do: 'uno', op, ... }) and the pushes "uno",
 // "unoState" and "unoFrame"). Nothing here is made up: when the host isn't there, the view says so.
 // app.js calls SquallUno.wire(hooks) once; the pure parts are tested with Node in tests/web/uno.test.mjs.
@@ -15,7 +15,7 @@
   const MAX_EVENTS = 1500;          // kept in the window (all computers); the host keeps the rest
   const MAX_SESSIONS = 60;
   const STATE_PAGE = 300;           // the host answers at most 300 events per state call
-  const RUNNING = ['starting', 'running', 'you'];
+  const RUNNING = ['starting', 'running', 'paused', 'you'];   // a paused task still holds its computer
   const CLICK_KINDS = ['click', 'left_click', 'double_click', 'triple_click', 'right_click', 'middle_click'];
 
   // ---------------------------------------------------------------- ids
@@ -148,14 +148,15 @@
   // ---------------------------------------------------------------- words
 
   // The state line for a computer and its session: { key, label, detail, live, dot }
-  //   key: off | starting | live | you | done | stopped | error | on
+  //   key: off | starting | live | paused | you | done | stopped | error | on
   //   live: the screen is moving (LIVE pill); dot: the sidebar's live dot (anything running)
   function statusOf(computer, session) {
     const cs = computer && computer.state ? computer.state : 'off';
     const ss = session ? session.state : '';
     const stateText = computer && computer.stateText ? String(computer.stateText) : '';
     const R = (key, label, detail) => ({ key, label, detail: detail || '', live: key === 'live' || key === 'you', dot: key === 'live' || key === 'you' || key === 'starting' });
-    if (ss === 'you') return R('you', 'You have the wheel', 'Squall Uno is paused. Hand it back when you’re done.');
+    if (ss === 'you') return R('you', 'You have the wheel', 'Squall Uno is waiting. Hand it back when you’re done.');
+    if (ss === 'paused') return Object.assign(R('paused', 'Paused', 'Squall Uno is waiting. Press Resume to let it carry on.'), { dot: true });
     if (ss === 'running') return R('live', 'Live', '');
     if (ss === 'starting' || cs === 'starting') return R('starting', 'Starting…', stateText || 'Getting the computer ready.');
     if (cs === 'error') return R('error', 'Error', stateText || 'The computer had a problem.');
@@ -170,8 +171,20 @@
   }
 
   // A session's own state, for the recent list
-  const SESSION_WORDS = { starting: 'Starting…', running: 'Live', you: 'You have the wheel', done: 'Done', stopped: 'Stopped', error: 'Error' };
+  const SESSION_WORDS = { starting: 'Starting…', running: 'Live', paused: 'Paused', you: 'You have the wheel', done: 'Done', stopped: 'Stopped', error: 'Error' };
   function sessionLabel(s) { return (s && SESSION_WORDS[s.state]) || 'Unknown'; }
+
+  // Which of Pause / Resume a session's controls show: 'pause' (starting or running), 'resume' (paused), or null
+  // (ended, or you have the wheel: hand it back first).
+  function pauseAction(s) {
+    if (!s) return null;
+    if (s.state === 'paused') return 'resume';
+    if (s.state === 'running' || s.state === 'starting') return 'pause';
+    return null;
+  }
+
+  // The class of a computer's live dot: starting (amber), paused (still), else live (red, pulsing).
+  function dotClass(st) { return st && (st.key === 'starting' || st.key === 'paused') ? st.key : 'live'; }
 
   // The "NOW · step N" line: { label, text }
   function nowLine(session) {
@@ -206,13 +219,14 @@
     wait: ['clock', '#7d8197'],
     say: ['chat', '#eceaf6'], message: ['chat', '#eceaf6'],
     takeover: ['hand', '#8b5cf6'], handback: ['hand', '#8b5cf6'],
+    pause: ['pause', '#7dd3fc'], resume: ['play', '#7dd3fc'],
     done: ['check', '#4ade80'], stopped: ['stop', '#f5b14a'], error: ['alert', '#f87171'],
   };
   const KIND_WORDS = {
     start: 'Started', screenshot: 'Looked at the screen', zoom: 'Zoomed in', click: 'Clicked', left_click: 'Clicked', double_click: 'Double-clicked',
     triple_click: 'Triple-clicked', right_click: 'Right-clicked', middle_click: 'Middle-clicked', mouse_down: 'Pressed the mouse', mouse_up: 'Let go of the mouse',
     move: 'Moved the mouse', cursor: 'Checked where the mouse is', drag: 'Dragged', type: 'Typed', key: 'Pressed a key', hold_key: 'Held a key', scroll: 'Scrolled',
-    wait: 'Waited', say: 'Said something', message: 'Message', takeover: 'You took the wheel', handback: 'You handed it back', done: 'Done', stopped: 'Stopped', error: 'Error',
+    wait: 'Waited', say: 'Said something', message: 'Message', takeover: 'You took the wheel', handback: 'You handed it back', pause: 'Paused by you', resume: 'Resumed', done: 'Done', stopped: 'Stopped', error: 'Error',
   };
 
   // One "WHAT IT DID" row: { seq, icon, color, text, who, you, when, cls }
@@ -302,6 +316,7 @@
   const ICONS = {
     bolt: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M13.2 2 5 13.4h5.6L9.4 22l8.6-12h-5.7z"/></svg>',
     play: '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>',
+    pause: '<rect x="6.5" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/>',
     camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
     zoom: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5M11 8v6M8 11h6"/>',
     pointer: '<path d="M5 3l6 17 2.5-7L21 10.5z" fill="currentColor" stroke="none"/>',
@@ -389,7 +404,7 @@
       if (here && isClick(fresh) && !(fresh.who === 'you' && Date.now() - ui.localClickAt < 4000)) ripple(+fresh.x, +fresh.y, fresh.who === 'you');
       if (here && num(fresh.x) && num(fresh.y) && fresh.kind !== 'scroll') moveCursor(+fresh.x, +fresh.y);
       // a session's last word changes the state too: ask once, quietly
-      if (/^(done|stopped|error|takeover|handback|start)$/.test(fresh.kind)) setTimeout(() => refresh(), 250);
+      if (/^(done|stopped|error|takeover|handback|pause|resume|start)$/.test(fresh.kind)) setTimeout(() => refresh(), 250);
       changedSoon();
     }
 
@@ -440,7 +455,7 @@
         const on = ui.open && ui.agentId === a.agentId;
         return '<button class="uno-row' + (on ? ' on' : '') + (st && st.dot ? ' live' : '') + (st ? ' s-' + st.key : '') + '" data-k="uno:' + esc(a.agentId) + '" data-uno-open="' + esc(a.agentId) + '" title="' + esc(a.agentName + '’s computer' + (st ? ' · ' + st.label + (st.detail ? ' · ' + st.detail : '') : '')) + '">' +
           iconFor(a) + '<span class="uno-rt"><span class="uno-nm">' + esc(a.agentName) + '</span><span class="uno-st">' + esc(label) + '</span></span>' +
-          (st && st.dot ? '<i class="uno-dot ' + (st.key === 'starting' ? 'starting' : 'live') + '"></i>' : '') + '</button>';
+          (st && st.dot ? '<i class="uno-dot ' + dotClass(st) + '"></i>' : '') + '</button>';
       }).join('');
       return '<div class="uno-side" data-k="uno-side"><div class="uno-side-head" data-k="uno-side-head"><span class="uno-side-bolt">' + ICONS.bolt + '</span>Squall Uno' +
         (live ? '<span class="uno-side-live"><i></i>' + live + ' live</span>' : '') + '</div>' + rows + '</div>';
@@ -466,7 +481,7 @@
           iconFor(a, true) + '<span class="uno-pcard-t"><span class="uno-pcard-nm">' + esc(a.agentName) + '’s computer</span>' +
           '<span class="uno-pcard-st">' + esc(st.label) + (sess && isRunning(sess) && sess.steps ? ' · step ' + esc(sess.steps) : '') + '</span>' +
           (line ? '<span class="uno-pcard-now">' + esc(line) + '</span>' : '') + '</span>' +
-          (st.dot ? '<i class="uno-dot ' + (st.key === 'starting' ? 'starting' : 'live') + '"></i>' : '') + '</button>';
+          (st.dot ? '<i class="uno-dot ' + dotClass(st) + '"></i>' : '') + '</button>';
       }).join('');
       const s = store.settings || null;
       let hints = '';
@@ -673,7 +688,7 @@
       const nl = nowLine(sess);
       setText('.uno-now-l', past ? 'THEN' + (sess.steps ? ' · step ' + sess.steps : '') : nl.label);
       setText('.uno-now-t', nl.text || (sess ? '' : available && ui.loaded ? 'Nothing yet. Give it a task below.' : ''));
-      const nowEl = $u('.uno-now'); if (nowEl) { nowEl.classList.toggle('live', isRunning(sess) && !past); nowEl.hidden = !available; }
+      const nowEl = $u('.uno-now'); if (nowEl) { nowEl.classList.toggle('live', isRunning(sess) && !past && sess.state !== 'paused'); nowEl.classList.toggle('paused', !!sess && sess.state === 'paused' && !past); nowEl.hidden = !available; }
 
       // the buttons
       const running = isRunning(cur);
@@ -683,6 +698,9 @@
       if (available && ui.loaded) {
         if (running && cur.state !== 'you') ctrls += '<button class="uno-btn wheel" data-u="takeover"' + (b.takeover ? ' disabled' : '') + '>' + svg('hand') + 'Take the wheel</button>';
         if (!running && comp && comp.state === 'on' && !ui.wheelLocal) ctrls += '<button class="uno-btn" data-u="drive">' + svg('hand') + 'Use it yourself</button>';
+        const pa = pauseAction(cur);
+        if (pa === 'pause') ctrls += '<button class="uno-btn" data-u="pause"' + (b.pause ? ' disabled' : '') + ' title="Lets the step it is on finish, then waits (Space)">' + svg('pause') + 'Pause</button>';
+        if (pa === 'resume') ctrls += '<button class="uno-btn resume" data-u="resume"' + (b.resume ? ' disabled' : '') + ' title="Lets Squall Uno carry on (Space)">' + svg('play') + 'Resume</button>';
         if (running) ctrls += '<button class="uno-btn" data-u="stop"' + (b.stop ? ' disabled' : '') + '>' + svg('stop') + 'Stop</button>';
         if (anyRun) ctrls += '<button class="uno-btn danger" data-u="stopAll"' + (b.stopAll ? ' disabled' : '') + ' title="Stops every Squall Uno task on every computer">' + svg('stop') + 'Stop everything</button>';
         if (!running && comp && comp.state !== 'off') ctrls += '<button class="uno-btn quiet" data-u="computerOff"' + (b.computerOff ? ' disabled' : '') + ' title="Turns this computer off. Its files go away.">Turn off</button>';
@@ -921,6 +939,8 @@
         }
         case 'takeover': if (cur) run('takeover', { sessionId: cur.id }); break;
         case 'drive': ui.wheelLocal = true; render(); break;
+        case 'pause': if (cur) run('pause', { sessionId: cur.id }); break;
+        case 'resume': if (cur) run('resume', { sessionId: cur.id }); break;
         case 'stop': if (cur) run('stop', { sessionId: cur.id }); break;
         case 'stopAll': run('stopAll', {}, res => { if (res.stopped === 0) flash('Nothing was running.'); refresh(); }); break;
         case 'computerOff': {
@@ -1008,11 +1028,18 @@
       paintChip();
     }
 
-    // Esc leaves the settings, then the view (unless a text box or a dialog is in front)
+    // Esc leaves the settings, then the view; Space pauses or resumes the task (unless a text box, a button or a dialog is in front)
     document.addEventListener('keydown', e => {
-      if (!ui.open || e.key !== 'Escape') return;
+      if (!ui.open || (e.key !== 'Escape' && e.key !== ' ')) return;
       if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName || '')) return;
       if (document.querySelector('.modal-back, .qk-pop, .qk-back, .use-pop, .cx-pop, .mm-pop, .lightbox')) return;
+      if (e.key === ' ') {
+        const tag = (e.target && e.target.tagName) || '';
+        if (e.repeat || e.ctrlKey || e.altKey || e.metaKey || tag === 'BUTTON' || tag === 'A' || (e.target && e.target.isContentEditable)) return;
+        const b = $u('[data-u="pause"], [data-u="resume"]');
+        if (b && !b.disabled) { e.preventDefault(); b.click(); }
+        return;
+      }
       if (ui.settings) { ui.settings = false; render(); return; }
       close(); if (h.onClose) h.onClose();
     });
@@ -1028,7 +1055,7 @@
 
   const api = {
     CHIEF, computerIdFor, agentsForUno, newStore, payloadOf, eventOf, addEvents, mergeState, takeEvent, takeFrame,
-    computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, nowLine, ago,
+    computerOf, currentSession, sessionsFor, sessionEvents, isRunning, anyRunning, statusOf, sessionLabel, pauseAction, dotClass, nowLine, ago,
     feedRow, isClick, framePct, cursorPct, displayToScreen, fitBox, clampSteps, keyText, tokensText, errorText, wire,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

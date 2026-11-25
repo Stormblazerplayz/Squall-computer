@@ -38,7 +38,7 @@ ran. Nothing is made up when Docker or the API key is missing; the app says what
 // Session
 { "id": "uno-3f2a9c1b7d4e", "computerId": "pc-chief", "agentId": "chief", "agentName": "Chief",
   "task": "Find the weather in Paris",
-  "state": "starting" | "running" | "you" | "done" | "stopped" | "error",   // "you" = the user has the wheel
+  "state": "starting" | "running" | "paused" | "you" | "done" | "stopped" | "error",   // "paused" = waiting for Resume, "you" = the user has the wheel
   "startedAt": 1764000000000, "endedAt": null,
   "steps": 7,                          // tool calls run so far
   "now": "Clicking Search at (640, 120)",   // what it is doing right now (or last did)
@@ -52,7 +52,7 @@ ran. Nothing is made up when Docker or the API key is missing; the app says what
   "who": "uno" | "you" | "system",
   "kind": "start" | "screenshot" | "zoom" | "click" | "double_click" | "triple_click" | "right_click" |
           "middle_click" | "move" | "drag" | "mouse_down" | "mouse_up" | "type" | "key" | "hold_key" |
-          "scroll" | "wait" | "cursor" | "say" | "message" | "takeover" | "handback" | "done" |
+          "scroll" | "wait" | "cursor" | "say" | "message" | "pause" | "resume" | "takeover" | "handback" | "done" |
           "stopped" | "error",
   "text": "Clicked at (412, 230)",      // short plain sentence for the feed
   "x": 412, "y": 230,                  // optional, screen pixels (computer's width × height space)
@@ -81,12 +81,14 @@ answer is a JSON object. A failed op answers `{ "ok": false, "error": "<plain se
 |---|---|---|
 | `state` | `since` (int, optional, default 0), `sessionId` (optional) | `{ ok, settings, computers[], sessions[] (newest first, max 30), events[] (seq > since, oldest first, max 300, only that session's if sessionId), lastSeq }` — pass `lastSeq` as the next `since` (when more than 300 are waiting it is the last one returned, so the next call gets the rest; a `since` bigger than anything Squall has, e.g. from before a restart, starts from the oldest kept event) |
 | `start` | `agentId`, `agentName`, `task` | `{ ok, sessionId, computerId }` — starts the computer if needed, then the session |
-| `message` | `sessionId`, `text` | `{ ok }` — follow-up; if the session ended it continues the same conversation, if it is running the text is given to Squall Uno before its next step |
+| `message` | `sessionId`, `text` | `{ ok }` — follow-up; if the session ended it continues the same conversation, if it is running the text is given to Squall Uno before its next step (when paused: after Resume) |
 | `stop` | `sessionId` | `{ ok }` |
-| `stopAll` | – | `{ ok, stopped }` — stops every running session (computers stay on) |
-| `takeover` | `sessionId` | `{ ok }` — session state becomes `"you"`; Squall Uno pauses after the action it is on |
+| `stopAll` | – | `{ ok, stopped }` — stops every running session, paused ones too (computers stay on) |
+| `pause` | `sessionId` | `{ ok }` — session state becomes `"paused"`: the step it is on finishes, then it waits before its next model call (no tokens meanwhile). Feed: `who: "you"`, `kind: "pause"`, "Paused by you." Already paused → `{ ok }`. Not running → `{ok:false, error:"That task isn't running, so there's nothing to pause."}`; while the user has the wheel → `{ok:false}` (hand it back first) |
+| `resume` | `sessionId` | `{ ok }` — a paused session goes back to `"running"`; Squall Uno is told it was paused and takes a screenshot first. Feed: `kind: "resume"`, "Resumed." Not paused → `{ ok }`; not running → `{ok:false, error}`. Resuming while the user has the wheel (paused, then took over) means it carries on as soon as they hand back |
+| `takeover` | `sessionId` | `{ ok }` — session state becomes `"you"`; Squall Uno waits after the action it is on. Works while paused too |
 | `input` | `computerId`, `action` (`left_click`, `double_click`, `right_click`, `type`, `key`, `scroll`), `x`, `y` (clicks, scroll), `text` (type, key), `direction` (`up`/`down`, scroll), `amount` (scroll, optional, default 3) | `{ ok }` — only while that computer's session is `"you"` or no session is running; logged with `who: "you"`. `x`/`y` are in the computer's 1280×800 space; key names like `Return`, `ctrl+l` |
-| `handback` | `sessionId`, `note` (optional) | `{ ok }` — Squall Uno gets a list of what you did plus the note, then carries on |
+| `handback` | `sessionId`, `note` (optional) | `{ ok }` — Squall Uno gets a list of what you did plus the note, then carries on (if it was paused before you took over, it goes back to `"paused"` until `resume`) |
 | `computerOff` | `computerId` | `{ ok }` — stops its session and removes the container |
 | `saveKey` | `key` | `{ ok, settings }` |
 | `removeKey` | – | `{ ok, settings }` |
@@ -131,7 +133,15 @@ carries the name, no payload has a key called `event`:
    error happens (`error`, with a plain sentence). A refusal ends with `error` too.
 5. While the user has the wheel (`takeover`), Squall Uno skips the rest of the actions it was given and waits before
    its next model call; `handback` gives it a list of what the user did plus their note.
-6. A `message` to an ended session continues the same conversation. Conversations live in memory (the 10 newest
+6. `pause` works the same way without giving the user the computer: the action running right now finishes, the rest of
+   that turn's actions answer "Not done: the user paused you…", and no model call (so no tokens) happens until
+   `resume`, which also tells Squall Uno to take a fresh screenshot. A paused task is still active: it keeps its
+   computer (on, and its screen still streams), the computer stays busy for new tasks, and `stop`, `stopAll`,
+   `takeover`, `message` and `computerOff` all work. The step limit counts model turns, so a pause never uses any of
+   it. There is no idle timer or time limit on tasks and Squall never turns a computer off by itself while a task holds
+   it, so a paused task waits as long as it takes; closing Squall stops it like any running task (it comes back as
+   `stopped`).
+7. A `message` to an ended session continues the same conversation. Conversations live in memory (the 10 newest
    ended ones are kept); after a restart Squall Uno starts fresh with the old task as a reminder and the feed says so.
-7. Sessions and settings are kept in `uno/state.json` (no screenshots, no key). Sessions running when Squall closed
+8. Sessions and settings are kept in `uno/state.json` (no screenshots, no key). Sessions running when Squall closed
    come back as `stopped`. Closing Squall stops (doesn't delete) the computers; `computerOff` removes one for good.

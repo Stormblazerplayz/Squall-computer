@@ -67,8 +67,8 @@ namespace Squall.Link.Uno
         public long InputTokens { get; set; }
         public long OutputTokens { get; set; }
 
-        /// <summary>starting, running or you: the session holds its computer.</summary>
-        public bool Active => State is "starting" or "running" or "you";
+        /// <summary>starting, running, paused or you: the session holds its computer.</summary>
+        public bool Active => State is "starting" or "running" or "paused" or "you";
 
         public JsonObject ToJson() => new()
         {

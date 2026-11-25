@@ -124,6 +124,8 @@ namespace Squall.Link.Uno
                     case "message": return await MessageOp(request, ct).ConfigureAwait(false);
                     case "stop": return StopOp(request);
                     case "stopAll": return new JsonObject { ["ok"] = true, ["stopped"] = StopAll("Stopped.") };
+                    case "pause": return PauseOp(request);
+                    case "resume": return ResumeOp(request);
                     case "takeover": return TakeoverOp(request);
                     case "input": return await InputOp(request, ct).ConfigureAwait(false);
                     case "handback": return HandbackOp(request);
@@ -328,8 +330,65 @@ namespace Squall.Link.Uno
         {
             bool ended = EndSession(run, "stopped", null, why);
             try { run.Cts.Cancel(); } catch (ObjectDisposedException) { }
-            lock (_lock) run.HandBack.TrySetResult();
+            lock (_lock)
+            {
+                run.HandBack.TrySetResult();
+                run.Resumed.TrySetResult();
+            }
             return ended;
+        }
+
+        /// <summary>
+        /// Pauses a task: the step it is on finishes, then it waits before its next model call (no tokens meanwhile).
+        /// The computer stays on and the task keeps it; Stop and Take the wheel still work.
+        /// </summary>
+        private JsonObject PauseOp(JsonObject req)
+        {
+            string sid = Str(req, "sessionId");
+            UnoSession s;
+            lock (_lock)
+            {
+                s = Session(sid) ?? throw new UnoException("That task wasn't found.");
+                if (!s.Active || !_runs.TryGetValue(sid, out var run)) throw new UnoException("That task isn't running, so there's nothing to pause.");
+                if (s.State == "paused") return Ok();
+                if (s.State == "you") throw new UnoException("You have the computer right now. Hand it back first, then pause.");
+                run.Paused = true;
+                run.Resumed.TrySetResult();
+                run.Resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                s.State = "paused";
+                s.Now = "Waiting for you to press Resume";
+                run.Touched = _clock();
+                _store.Save();
+            }
+            Log(s, "you", "pause", "Paused by you.");
+            RaiseChanged();
+            return Ok();
+        }
+
+        private JsonObject ResumeOp(JsonObject req)
+        {
+            string sid = Str(req, "sessionId");
+            UnoSession s;
+            lock (_lock)
+            {
+                s = Session(sid) ?? throw new UnoException("That task wasn't found.");
+                if (!s.Active || !_runs.TryGetValue(sid, out var run)) throw new UnoException("That task isn't running, so there's nothing to resume.");
+                if (!run.Paused) return Ok();
+                run.Paused = false;
+                // Time went by, and the screen may have changed meanwhile.
+                if (run.Messages.Count > 0) run.Pending.Enqueue("The user paused you for a bit and has now let you carry on. Take a screenshot to see the screen now, then carry on with the task.");
+                if (s.State == "paused")
+                {
+                    s.State = "running";
+                    s.Now = "Looking at the screen";
+                }
+                run.Resumed.TrySetResult();
+                run.Touched = _clock();
+                _store.Save();
+            }
+            Log(s, "you", "resume", "Resumed.");
+            RaiseChanged();
+            return Ok();
         }
 
         private JsonObject TakeoverOp(JsonObject req)
@@ -341,7 +400,8 @@ namespace Squall.Link.Uno
                 s = Session(sid) ?? throw new UnoException("That task wasn't found.");
                 if (!s.Active || !_runs.TryGetValue(sid, out var run)) throw new UnoException("That task isn't running.");
                 if (s.State == "you") return Ok();
-                if (s.State == "starting") throw new UnoException("The computer is still starting. Wait a moment, then take over.");
+                bool booting = s.State == "starting" || _store.Computers.FirstOrDefault(c => c.Id == s.ComputerId)?.State == "starting";   // paused while starting
+                if (booting) throw new UnoException("The computer is still starting. Wait a moment, then take over.");
                 s.State = "you";
                 s.Now = "Waiting for you to give the computer back";
                 run.YouDid.Clear();
@@ -358,6 +418,7 @@ namespace Squall.Link.Uno
             string note = Str(req, "note").Trim();
             if (note.Length > MaxTaskChars) note = note.Substring(0, MaxTaskChars);
             UnoSession s;
+            bool paused;
             lock (_lock)
             {
                 s = Session(sid) ?? throw new UnoException("That task wasn't found.");
@@ -374,11 +435,14 @@ namespace Squall.Link.Uno
                 sb.Append("\n\nThe computer is yours again. Take a screenshot to see the screen now, then carry on with the task.");
                 run.Pending.Enqueue(sb.ToString().Trim());
                 run.YouDid.Clear();
-                s.State = "running";
-                s.Now = "Looking at the screen";
+                // Paused before taking the wheel: it stays paused until Resume.
+                paused = run.Paused;
+                s.State = paused ? "paused" : "running";
+                s.Now = paused ? "Waiting for you to press Resume" : "Looking at the screen";
                 run.HandBack.TrySetResult();
             }
-            Log(s, "you", "handback", note.Length > 0 ? "You gave the computer back: " + ComputerActions.Short(note, 120) : "You gave the computer back.");
+            string back = note.Length > 0 ? "You gave the computer back: " + ComputerActions.Short(note, 120) : "You gave the computer back.";
+            Log(s, "you", "handback", paused ? back + " Squall Uno stays paused until you resume it." : back);
             RaiseChanged();
             return Ok();
         }
@@ -396,6 +460,7 @@ namespace Squall.Link.Uno
                 var active = ActiveSessionOn(computer);
                 if (active != null)
                 {
+                    if (active.State == "paused") throw new UnoException("Squall Uno is paused on this computer. Take over first.");
                     if (active.State != "you") throw new UnoException("Squall Uno is using this computer. Take over first.");
                     _runs.TryGetValue(active.Id, out youRun);
                     sessionId = active.Id;
