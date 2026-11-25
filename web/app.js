@@ -2000,12 +2000,28 @@
       });
       return out;
     }
-    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time }));
+    return c.messages.filter(m => m.kind !== 'approve').map(m => ({ id: m.id, who: m.kind === 'user' ? 'Storm' : m.who, kind: m.kind === 'event' ? 'event' : m.kind === 'error' ? 'error' : 'msg', text: String(m.text || ''), at: m.time, photos: (m.images || []).length || undefined }));
   }
   function linkTyping(c) {
     const mi = c.kind === 'dm' ? mirrorFor(c) : null;
     return [...new Set(Object.keys(S.typing[c.id] || {}).concat(mi && mirrorBusy(mi, false) ? [c.members[0]] : []))];
   }
+  // photos sent from the phone (link.js photoDo): the same as pasting them into chat c and sending, without moving the PC there
+  function linkSendPhotos(c, text, saved) {
+    const input = $('#input');
+    const keep = { active: S.active, split: S.split, right: S.focusRight, draft: input.value, attach: S.attach };
+    S.active = c.id; S.split = null; S.focusRight = false; S.attach = saved.slice();
+    input.value = text || '';
+    try { send(); } catch (e) { Bridge.call('log', { level: 'error', msg: 'phone photo: ' + (e && e.stack || e) }).catch(() => { }); }
+    const sent = S.attach.length === 0;   // send() empties the attachments when it takes the message
+    S.active = keep.active; S.split = keep.split; S.focusRight = keep.right; S.attach = keep.attach;
+    input.value = keep.draft; autosize(); renderAttach(); saveDraft(); renderAll();
+    return sent;
+  }
+  window.SquallPhotoOps = {
+    save: (data, type, name) => Bridge.call('saveImage', { data, type, name }),
+    send: (c, text, saved) => linkSendPhotos(c, text, saved),
+  };
   // sends text into chat c as Storm, the same as typing it there, without moving the PC to that chat; true when it went (or queued)
   function linkSend(c, text, call) {
     const input = $('#input');

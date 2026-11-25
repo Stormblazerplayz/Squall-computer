@@ -377,6 +377,69 @@
 
   root.SquallNotes = { notesRoute, noteRows, noteName, notesDesk, withNotes, NOTES_MAX, NOTE_MAX_TEXT };
 
+  // ---------------------------------------------------------------- photos from the phone
+  // chat.sendPhoto { chatId, text?, photos: [{ data (base64, no data: prefix), type: image/jpeg or image/png, name? }] }
+  // Each photo is saved the same way as one pasted into the chat here, and the message goes in as Storm's with the photos
+  // attached, so the teammate gets the saved paths to open. The link takes 1 MB a request, so the phone shrinks photos first.
+
+  const PHOTOS_MAX = 3;
+  const PHOTO_MAX_BYTES = 700000;
+  const PHOTO_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png' };
+  const B64_RX = /^[A-Za-z0-9+/]+={0,2}$/;
+
+  function photoLabel(n) { return n > 1 ? '📷 ' + n + ' photos' : '📷 Photo'; }
+
+  // bytes a base64 string holds, or -1 when it isn't base64
+  function b64Bytes(data) {
+    if (typeof data !== 'string' || !data.length || data.length % 4 || !B64_RX.test(data)) return -1;
+    return data.length / 4 * 3 - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+  }
+
+  function photoName(raw, type, i) {
+    const ext = PHOTO_TYPES[type];
+    let name = String(raw || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '').trim().slice(0, 60);
+    if (!name) name = 'phone-photo-' + (i + 1);
+    if (!new RegExp('\\.' + ext + '$', 'i').test(name)) name = name.replace(/\.[a-z0-9]{1,5}$/i, '') + '.' + ext;
+    return name;
+  }
+
+  // null when it isn't a photo action; { error } or { do: 'photo', chat, text, photos: [{ dataUrl, name }] }
+  function photoRoute(view, a) {
+    if (!a || a.type !== 'chat.sendPhoto') return null;
+    const chat = chatFor(view, a.chatId);
+    if (!chat) return { error: 'That chat isn’t on the computer any more.' };
+    const list = Array.isArray(a.photos) ? a.photos : [];
+    if (!list.length) return { error: 'Pick a photo to send.' };
+    if (list.length > PHOTOS_MAX) return { error: 'Send up to ' + PHOTOS_MAX + ' photos at a time.' };
+    const photos = [];
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i] || {};
+      const type = String(p.type || '').toLowerCase();
+      if (!PHOTO_TYPES[type]) return { error: 'Send photos as JPEG or PNG.' };
+      const bytes = b64Bytes(p.data);
+      if (bytes < 0) return { error: 'That photo didn’t come through. Try again.' };
+      if (bytes > PHOTO_MAX_BYTES) return { error: 'That photo is too big to send.' };
+      photos.push({ dataUrl: 'data:' + type + ';base64,' + p.data, type, name: photoName(p.name, type, i) });
+    }
+    return { do: 'photo', chat, text: String(a.text || '').trim().slice(0, 20000), photos };
+  }
+
+  // ops: { save(dataUrl, type, name) -> { path, url }, send(chat, text, saved) -> true when it went }
+  async function photoDo(r, ops) {
+    if (r.error) return { ok: false, error: r.error };
+    if (!ops) return { ok: false, error: CANT };
+    const saved = [];
+    for (const p of r.photos) {
+      const got = await ops.save(p.dataUrl, p.type, p.name);
+      if (!got || !got.path) return { ok: false, error: 'Squall couldn’t save that photo on the computer.' };
+      saved.push({ kind: 'image', path: got.path, url: got.url || '', name: p.name });
+    }
+    if (!ops.send(r.chat.raw, r.text, saved)) return { ok: false, error: 'Squall couldn’t send that. The chat may be busy, or Squall isn’t signed in to Claude.' };
+    return { ok: true };
+  }
+
+  root.SquallPhotos = { photoRoute, photoDo, photoLabel, b64Bytes, photoName, PHOTOS_MAX, PHOTO_MAX_BYTES };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -529,7 +592,10 @@
         seen[base] = (seen[base] || 0) + 1;
         id = base + '-' + seen[base];
       }
-      const out = { id, kind, text: text.length > MAX_TEXT ? text.slice(0, MAX_TEXT) + '…' : text };
+      const photos = Math.max(0, Math.floor(+m.photos || 0));
+      const shown = text || (photos ? photoLabel(photos) : '');
+      const out = { id, kind, text: shown.length > MAX_TEXT ? shown.slice(0, MAX_TEXT) + '…' : shown };
+      if (photos) out.photos = photos;
       if (kind === 'bot') { const a = idOf(m.who); if (a) out.author = a; }
       if (m.at) out.at = m.at;
       return out;
@@ -749,8 +815,10 @@
           // Manage teammate first (bot.rename, bot.chief, bot.remove); everything else goes the usual way
           const team = teamRoute(teamView(), m.body || {});
           const note = team ? null : notes.route(m.body || {});
+          const photo = team || note ? null : photoRoute(view(), m.body || {});
           if (team) result = await teamDo(team, root.SquallTeamOps, async () => { await pushNow(); return view(); });
           else if (note) { result = await notes.run(note); await pushNow(); }
+          else if (photo) { result = await photoDo(photo, root.SquallPhotoOps); await pushNow(); }
           else result = await doAction(m.body || {});
           if (team && team.do === 'project') projects.load();
         }
