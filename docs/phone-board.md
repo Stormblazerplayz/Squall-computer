@@ -15,7 +15,7 @@ first, the last 6. The phone's Board shows them under **Steps**, and Mission con
 | anything else | `Used …` |
 
 A step that failed gets `(failed)`. When the bot is idle, `log` is left out. It comes from Squall's own runs (`a.turns` in
-`app.js`, the same steps Squall's Live pane shows); a bot that runs in its own live session doesn't send steps this way yet.
+`app.js`, the same steps Squall's Live pane shows), or from a live session as below.
 
 ## Live Claude app sessions
 
