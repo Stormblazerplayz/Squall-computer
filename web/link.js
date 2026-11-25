@@ -42,6 +42,139 @@
     return h.toString(36);
   }
 
+  // ---------------------------------------------------------------- send later
+  // Storm can write a message on the phone and pick when it goes. Squall keeps it (localStorage, so it lasts a restart) and sends
+  // it at that time, the same as typing it then. The phone sees the list as state.later and can cancel one or send it now.
+
+  const LATER_KEY = 'squall.sendLater';
+  const LATER_MIN_MS = 60 * 1000;                  // at least a minute ahead
+  const LATER_MAX_MS = 7 * 24 * 3600 * 1000;       // at most a week ahead
+  const LATER_STALE_MS = 12 * 3600 * 1000;         // more than 12 hours late (the computer was off): it doesn't go
+  const MAX_LATER = 30;
+
+  // The phone's id for a Squall chat: a bot's chat is the bot's id, a group or the team keeps its own id. Null when it's gone.
+  function phoneChatId(view, squallChatId) {
+    const c = ((view && view.chats) || []).find(x => x && x.id === squallChatId);
+    if (!c) return null;
+    if (c.kind !== 'dm') return c.id;
+    const ids = botIds((view && view.agents) || [], view && view.lead);
+    return ids[c.members && c.members[0]] || null;
+  }
+
+  // list: [{ id, chat (Squall's chat id), text, at (ms) }]. Returns state.later: [{ id, chatId, text, at (ISO) }], soonest first
+  function phoneLater(view, list) {
+    const out = [];
+    for (const l of Array.isArray(list) ? list : []) {
+      if (!l || !l.id || typeof l.text !== 'string') continue;
+      const chatId = phoneChatId(view, l.chat);
+      const at = new Date(Number(l.at));
+      if (!chatId || isNaN(at)) continue;
+      out.push({ id: String(l.id), chatId, text: l.text.slice(0, MAX_TEXT), at: at.toISOString() });
+    }
+    out.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
+    return out.slice(0, MAX_LATER);
+  }
+
+  // Adds state.later and works the version out again so the phone redraws when the list changes.
+  function withLater(state, view) {
+    const later = phoneLater(view, view && view.later);
+    if (later.length) { state.later = later; state.version = hash(JSON.stringify(state)); }
+    return state;
+  }
+
+  // chat.sendLater { chatId, text, at (ISO) }, chat.cancelLater { id } and chat.sendLaterNow { id }
+  function laterRoute(view, a, type) {
+    const list = (view && Array.isArray(view.later)) ? view.later : [];
+    if (type === 'chat.sendLater') {
+      const c = chatFor(view, a.chatId);
+      const text = String(a.text || '').trim();
+      if (!c) return { error: 'That chat isn’t on the computer any more.' };
+      if (!text) return { error: 'There’s nothing to send.' };
+      const at = Date.parse(String(a.at || ''));
+      const now = (view && view.now) || Date.now();
+      if (!isFinite(at)) return { error: 'Pick when to send it.' };
+      if (at < now + LATER_MIN_MS - 5000) return { error: 'Pick a time at least a minute from now.' };
+      if (at > now + LATER_MAX_MS) return { error: 'Pick a time in the next 7 days.' };
+      if (list.length >= MAX_LATER) return { error: 'There are already ' + MAX_LATER + ' messages waiting to send. Cancel one first.' };
+      return { do: 'later', later: { op: 'add', chat: c.id, text: text.slice(0, 20000), at } };
+    }
+    const id = String(a.id || a.itemId || '');
+    const item = list.find(l => l && String(l.id) === id);
+    if (!item) return { error: 'That message already went, or was canceled.' };
+    return { do: 'later', later: { op: type === 'chat.cancelLater' ? 'cancel' : 'now', id: item.id } };
+  }
+
+  // "7:30 AM" today, or "Thu 7:30 AM" on another day, in the computer's own time
+  function laterWhen(ms, now) {
+    const d = new Date(ms), t = new Date(now || Date.now());
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return d.toDateString() === t.toDateString() ? time : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + time;
+  }
+
+  // The window's list and its clock. changed() is called whenever the list changes, so the phone sees it right away.
+  function laterStore(h, changed) {
+    let list = [];
+    try {
+      const raw = JSON.parse(root.localStorage.getItem(LATER_KEY) || '[]');
+      if (Array.isArray(raw)) list = raw.filter(l => l && l.id && l.chat && typeof l.text === 'string' && isFinite(l.at));
+    } catch (e) { }
+    const save = () => { try { root.localStorage.setItem(LATER_KEY, JSON.stringify(list)); } catch (e) { } };
+    const chatOf = id => ((h.S && h.S.chats) || []).find(c => c.id === id);
+    const note = (chat, text) => { try { if (chat && h.note) h.note(chat, text); } catch (e) { } };
+    function sendOne(item) {
+      list = list.filter(l => l.id !== item.id);
+      save();
+      const chat = chatOf(item.chat);
+      if (!chat) return false;
+      const ok = !!h.send(chat, item.text, false);
+      if (!ok) note(chat, 'A message you set to send later couldn’t go: “' + item.text.slice(0, 80) + '”');
+      return ok;
+    }
+    function tick() {
+      const now = Date.now();
+      const due = list.filter(l => l.at <= now).sort((x, y) => x.at - y.at);
+      if (!due.length) return;
+      for (const item of due) {
+        if (now - item.at > LATER_STALE_MS) {   // the computer was off: a day-old message would be confusing now
+          list = list.filter(l => l.id !== item.id);
+          save();
+          note(chatOf(item.chat), 'A message set for ' + laterWhen(item.at, now) + ' didn’t go, because Squall wasn’t running then: “' + item.text.slice(0, 80) + '”');
+        } else sendOne(item);
+      }
+      changed();
+    }
+    const every = setInterval(tick, 15000), first = setTimeout(tick, 4000);
+    if (every && every.unref) { every.unref(); first.unref(); }   // Node (the tests): don't keep the process alive
+    return {
+      list: () => list.slice(),
+      tick,
+      do(op) {
+        if (op.op === 'add') {
+          const item = { id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), chat: op.chat, text: op.text, at: op.at, made: Date.now() };
+          list.push(item);
+          save();
+          note(chatOf(op.chat), 'From your phone: a message is set to send ' + laterWhen(op.at) + '.');
+          changed();
+          return { ok: true, id: item.id };
+        }
+        const item = list.find(l => l.id === op.id);
+        if (!item) return { ok: false, error: 'That message already went, or was canceled.' };
+        if (op.op === 'cancel') {
+          list = list.filter(l => l.id !== op.id);
+          save();
+          changed();
+          return { ok: true };
+        }
+        const ok = sendOne(item);
+        changed();
+        return ok ? { ok: true } : { ok: false, error: 'Squall couldn’t send that. Is it signed in to Claude?' };
+      },
+    };
+  }
+
+  // the pure parts, for tests/web/later.test.mjs (Node) without touching the exports below
+  root.SquallLater = { phoneChatId, phoneLater, withLater, laterRoute, laterWhen, laterStore, LATER_KEY };
+
   // ---------------------------------------------------------------- the phone's state
 
   const BOT_STATUS = { working: 'working', idle: 'idle', done: 'idle', error: 'idle', stopped: 'idle' };
@@ -227,6 +360,7 @@
   function routeAction(view, a) {
     const type = a && typeof a.type === 'string' ? a.type : '';
     switch (type) {
+      case 'chat.sendLater': case 'chat.cancelLater': case 'chat.sendLaterNow': return laterRoute(view, a, type);
       case 'chat.send': {
         const c = chatFor(view, a.chatId);
         const text = String(a.text || '').trim();
@@ -306,6 +440,10 @@
     let status = { running: false, phones: [], update: {} };
     let pairing = null;    // the open Pair a phone screen: { code, link, qrSvg, address, port, expiresAt }
     let sending = false;
+    // messages set to send later (see "send later" above): the phone's state and actions see the list
+    const later = laterStore(h, () => pushNow());
+    const laterView = () => Object.assign(view(), { later: later.list() });
+    const phoneState = () => { const v = laterView(); return withLater(buildState(v), v); };
 
     // what the phone sees, read from Squall's state each time
     function view() {
@@ -332,7 +470,7 @@
       if (sending || !status.running || !(status.phones || []).length) return;
       sending = true;
       let data;
-      try { data = buildState(view()); }
+      try { data = phoneState(); }
       catch (e) { sending = false; h.Bridge.call('log', { level: 'error', msg: 'link state: ' + (e && e.stack || e) }).catch(() => { }); return; }
       h.Bridge.call('link', { do: 'state', data }).catch(() => { }).finally(() => { sending = false; });
     }
@@ -340,7 +478,7 @@
     // sends the newest state right away and waits for the host to have it, so the phone's next read already shows a change
     async function pushNow() {
       if (!status.running) return;
-      try { await h.Bridge.call('link', { do: 'state', data: buildState(view()) }); } catch (e) { }
+      try { await h.Bridge.call('link', { do: 'state', data: phoneState() }); } catch (e) { }
     }
 
     function answer(rid, result) {
@@ -348,9 +486,10 @@
     }
 
     async function doAction(a) {
-      const v = view();
+      const v = laterView();
       const r = routeAction(v, a);
       if (r.error) return { ok: false, error: r.error };
+      if (r.do === 'later') return later.do(r.later);
       const chat = r.chat && r.chat.raw;
       switch (r.do) {
         case 'send': return h.send(chat, r.text, false) ? { ok: true } : { ok: false, error: 'Squall couldn’t send that. Is it signed in to Claude?' };
