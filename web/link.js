@@ -101,7 +101,7 @@
       if (ap.detail) item.command = String(ap.detail).slice(0, 600);
       if (ap.at) item.at = ap.at;
       return item;
-    });
+    }).concat(phoneInboxLog(view && view.inboxLog, idOf, view && view.now));
 
     const state = { typing, bots, chats, groups, inbox };
     // Squall's shared To do list (workspace\\shared\\todo.json), when this Squall has one
@@ -328,6 +328,32 @@
 
   // ---------------------------------------------------------------- actions from the phone
 
+  // Squall keeps a short log of a bot's errors and the jobs a bot finished (app.js, inboxLog); the phone shows them under Problems and Done.
+  // Cleared ones and ones older than 2 days stay off the phone, newest first, 30 at most
+  const INBOX_KEEP_MS = 2 * 24 * 3600 * 1000, MAX_INBOX_LOG = 30;
+  function phoneInboxLog(list, idOf, nowMs) {
+    const t0 = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
+    const out = [], seen = new Set();
+    for (const it of Array.isArray(list) ? list : []) {
+      if (!it || it.cleared || (it.kind !== 'error' && it.kind !== 'done')) continue;
+      const id = String(it.id || ''), botId = idOf(it.who);
+      if (!id || !botId || seen.has(id)) continue;
+      const at = Date.parse(it.at);
+      if (!isFinite(at) || t0 - at > INBOX_KEEP_MS) continue;
+      seen.add(id);
+      const item = { id, kind: it.kind, botId, title: String(it.title || (it.kind === 'error' ? it.who + ' hit a problem' : it.who + ' finished a job')).slice(0, 120), unread: !it.read, at: new Date(at).toISOString() };
+      const body = String(it.body || '').trim();
+      if (body) item.body = body.slice(0, 600);
+      if (it.kind === 'error') { const d = String(it.details || '').trim(); if (d) item.details = d.slice(0, 1500); }
+      else { item.openLabel = 'Open chat'; item.opens = 'chat'; }
+      out.push({ item, at });
+    }
+    return out.sort((a, b) => b.at - a.at).slice(0, MAX_INBOX_LOG).map(x => x.item);
+  }
+  function inboxLogItem(view, id) {
+    return ((view && view.inboxLog) || []).find(it => it && !it.cleared && String(it.id) === String(id)) || null;
+  }
+
   // Finds Squall's chat for the phone's chat id (a bot id, "team" or a group id).
   function chatFor(view, chatId) {
     const agents = (view && view.agents) || [];
@@ -398,8 +424,13 @@
         if (ans !== 'allow' && ans !== 'deny') return { error: 'Answer with Allow or Deny.' };
         return { do: 'answer', requestId: ap.requestId, decision: ans === 'allow' ? 'once' : 'deny' };
       }
-      case 'inbox.read': case 'inbox.readAll': return { do: 'none' };
-      case 'inbox.clear': return { error: 'Answer it with Allow or Deny, and it goes away.' };
+      case 'inbox.read': return inboxLogItem(view, a.itemId) ? { do: 'inboxRead', id: String(a.itemId) } : { do: 'none' };
+      case 'inbox.readAll': return { do: 'inboxReadAll' };
+      case 'inbox.clear': {
+        if (inboxLogItem(view, a.itemId)) return { do: 'inboxClear', id: String(a.itemId) };
+        if (((view && view.approvals) || []).some(x => String(x.requestId) === String(a.itemId))) return { error: 'Answer it with Allow or Deny, and it goes away.' };
+        return { do: 'none' };   // already gone
+      }
       case 'group.create': {
         const names = (Array.isArray(a.members) ? a.members : []).map(id => nameFor(view, id)).filter(Boolean);
         if (!names.length) return { error: 'Pick at least one bot for the group.' };
@@ -622,6 +653,7 @@
           id: c.id, kind: c.kind, name: c.name, members: c.members || [], unread: c.unread || 0,
           messages: h.phoneMessages(c), typing: h.typingIn(c), raw: c,
         })),
+        inboxLog: h.inbox ? h.inbox.list() : null,
         approvals,
         work: h.work ? h.work.list() : undefined,
         desktop: status.update || null,
@@ -685,6 +717,14 @@
         case 'answer': {
           const res = await h.answer(r.requestId, r.decision);
           return res && res.ok ? { ok: true } : { ok: false, error: 'That question had already gone on the computer.' };
+        }
+        case 'inboxRead': case 'inboxReadAll': case 'inboxClear': {
+          if (!h.inbox) return r.do === 'inboxClear' ? { ok: false, error: CANT } : { ok: true };
+          if (r.do === 'inboxRead') h.inbox.read(r.id);
+          else if (r.do === 'inboxReadAll') h.inbox.readAll();
+          else h.inbox.clear(r.id);
+          await pushNow();
+          return { ok: true };
         }
         case 'group': { const c = h.group(r.name, r.members); return c ? { ok: true, id: c.id } : { ok: false, error: 'Couldn’t make that group.' }; }
         case 'todoAdd': {

@@ -181,7 +181,7 @@
     if (m.kind === 'agent' && m.text && chat.id === S.active) callReply(m.text);   // voice chat: the reply shows on the call screen
     chat.messages.push(m);
     if (m.kind === 'agent') { if (chat.id === S.active) sfx('reply'); const ba = S.byName[m.who]; if (typeof bgPulse === 'function') bgPulse(ba ? ba.color : null); }
-    else if (m.kind === 'error') sfx('error');
+    else if (m.kind === 'error') { sfx('error'); inboxProblem(chat, m); }
     if (m.kind === 'agent' && chat.id === S.active && /```squall-ask/.test(m.text || '')) setTimeout(() => sfx('question'), 160);   // a question card, just after the reply chime
     if (chat.id !== S.active && m.kind !== 'user') chat.unread++;
     if (m.kind === 'agent' && chat.id !== S.active) showPeek(chat, m);   // a reply elsewhere pops out of the bot's icon
@@ -1709,6 +1709,7 @@
       const shown = stripTasks(r.text) || (tasks.length ? 'Here’s the plan.' : actions.length ? 'On it.' : '(no reply)');
       const msg = addMessage(chat, { who: name, kind: r.isError ? 'error' : 'agent', text: shown, live: (goLive || (NO_RELAY() && !!S.mirror[name])) && !r.isError, standIn: S.liveMode && !goLive && !(NO_RELAY() && S.mirror[name]) && !!peerFor(name), standInFor: name, images: r.images || [] });
       markSeen(chat, name, [msg.id]);
+      if (!r.isError && !r.stopped) inboxDone(chat, name, shown);
       if (!r.isError) logTurnToVault(chat, name, shown);
       if (actions.length) await runActions(chat, name, actions);
       if (tasks.length) {
@@ -2023,6 +2024,70 @@
     catch (e) { return { on: false, error: e.message }; }
   }
 
+  // ---------- Problems and Done in the phone's Inbox (the phone's Inbox had only approvals from this PC): a bot's error, and a job a bot
+  // finished (a reply after a run that used tools), each kept 2 days, 40 at most, with whether Storm read or cleared it on the phone.
+  // Real runs only: nothing is kept in the self-test or the mock team. Functions and a var, because addMessage can run before this line ----------
+  var inboxLogCache;
+  function inboxLogLoad() {
+    if (Array.isArray(inboxLogCache)) return inboxLogCache;
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem('squall.inboxLog') || '[]'); } catch (e) { list = []; }
+    inboxLogCache = Array.isArray(list) ? list.filter(x => x && x.id && (x.kind === 'error' || x.kind === 'done')) : [];
+    return inboxLogCache;
+  }
+  function inboxLogSave() {
+    const list = inboxLogLoad(), cut = Date.now() - 2 * 24 * 3600 * 1000;
+    inboxLogCache = list.filter(x => Date.parse(x.at) >= cut).slice(-40);
+    try { localStorage.setItem('squall.inboxLog', JSON.stringify(inboxLogCache)); } catch (e) { }
+  }
+  function inboxOff() { return !!(S.selftest || S.mock); }
+  // the bot an error is about: the bot whose run failed ("Nova: …", "Couldn’t run Nova: …", "Couldn’t reach Nova: …"). Squall's own
+  // errors about the window (a file too big, a folder that won't open) aren't a bot's problem, so they stay off the phone
+  function inboxBotFor(m) {
+    if (!m || !S.byName) return null;
+    if (m.who && m.who !== APP && S.byName[m.who]) return m.who;
+    const t = String(m.text || '');
+    const named = /^([A-Za-z][\w-]*):\s/.exec(t) || /^Couldn[’']t (?:run|reach) ([A-Za-z][\w-]*)\b/.exec(t) || /^([A-Za-z][\w-]*) has no Claude session\b/.exec(t);
+    return named && S.byName[named[1]] ? named[1] : null;
+  }
+  function inboxFirstLine(text, max) {
+    const t = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim();
+    const end = t.search(/[.!?](\s|$)/);
+    const first = end > 0 && end < max ? t.slice(0, end + 1) : t;
+    return first.length > max ? first.slice(0, max - 1).trimEnd() + '…' : first;
+  }
+  function inboxAdd(item) {
+    const list = inboxLogLoad();
+    // the same error again within 10 minutes: one item, moved to now
+    const same = item.kind === 'error' ? list.find(x => x.kind === 'error' && !x.cleared && x.who === item.who && x.details === item.details && Date.now() - Date.parse(x.at) < 600000) : null;
+    if (same) { same.at = item.at; same.read = item.read; same.count = (same.count || 1) + 1; same.title = item.who + ' hit the same problem ' + same.count + ' times'; }
+    else list.push(item);
+    inboxLogSave();
+  }
+  function inboxProblem(chat, m) {
+    if (inboxOff() || !m) return;
+    const who = inboxBotFor(m);
+    if (!who) return;
+    const text = String(m.text || '').trim();
+    if (!text) return;
+    const said = text.startsWith(who + ': ') ? text.slice(who.length + 2) : text;
+    inboxAdd({ id: 'p' + uid(), kind: 'error', who, chatId: chat && chat.id, title: who + ' hit a problem', body: inboxFirstLine(said, 200), details: text.slice(0, 1500), at: new Date().toISOString(), read: !!(chat && onScreen(chat.id)) });
+  }
+  function inboxDone(chat, name, text) {
+    if (inboxOff()) return;
+    const ag = S.byName && S.byName[name];
+    const tools = ag && Array.isArray(ag.turns) ? ag.turns.reduce((n, t) => n + ((t && t.tools) || []).length, 0) : 0;
+    if (!tools) return;   // a plain answer isn't a finished job
+    inboxAdd({ id: 'd' + uid(), kind: 'done', who: name, chatId: chat && chat.id, title: name + ' finished a job', body: inboxFirstLine(text, 200) || (tools + (tools === 1 ? ' step' : ' steps') + ' done'), at: new Date().toISOString(), read: !!(chat && onScreen(chat.id)) });
+  }
+  function inboxLogList() { return inboxLogLoad().slice(); }
+  function inboxMark(id, what) {
+    let changed = false;
+    for (const x of inboxLogLoad()) if ((id == null ? !x.read : String(x.id) === String(id)) && !x[what]) { x[what] = true; if (what === 'cleared') x.read = true; changed = true; }
+    if (changed) inboxLogSave();
+    return changed;
+  }
+
   // ---------- the Squall app on iPhone and iPad (link.js; the host's SquallLink serves the phone): what it may read and do here ----------
   // Only Squall's real state goes to the phone. Each hook is called later, never while this file is still loading.
   function linkMessages(c) {
@@ -2085,6 +2150,7 @@
       clearDone: () => { const n = TODO.items.length; TODO.items = TODO.items.filter(x => x.status !== 'done'); if (TODO.items.length !== n) todoSave(); return n - TODO.items.length; },
     },
     openSettings: () => openSettings(),
+    inbox: { list: () => inboxLogList(), read: id => inboxMark(id, 'read'), readAll: () => inboxMark(null, 'read'), clear: id => inboxMark(id, 'cleared') },
     closeModal: () => closeModal(),
     sfx: name => sfx(name),
     usage: () => usageForPhone(),
