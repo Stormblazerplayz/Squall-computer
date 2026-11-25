@@ -20,6 +20,17 @@ Squall for the computer: Storm's AI team app for Windows. The phone app is [Squa
 - `web/farside-demo.json`, the script behind the `/demo farside` command, because it holds private project notes. Without it that command answers that there is no demo.
 - One project name and a local folder path in `web/app.js` were replaced with neutral text. The `FARSIDE` constant in the idle-bot section is a placeholder: set it to your own folder.
 
+## Live work on the phone
+
+Each bot's job goes to the phone in `state.work`, for its **Live work** screens: what the job is (Storm's ask, a routine or idle
+work), who gave it, when it started, what the bot is doing now, its steps (the tools it really used), its terminal (its shell
+commands and their output) and the files it wrote or edited. A job Squall only sees from outside (a live session) has no steps.
+A finished job stays for 10 minutes.
+
+**Stop** (`work.stop`) stops the bot like Squall's own Stop. **Pause** (`work.pause`) stops it too and holds it: no work timer,
+To do drive or idle nudges reach it until **Resume**, which tells it to carry on, or until you write to it. **Send a note**
+(`work.note`) goes to the bot's own chat.
+
 ## Phone pairing and updates
 
 **The iPhone and iPad app** pairs with a QR code: Settings, Squall app (iPhone and iPad), Pair a phone. The phone side is
