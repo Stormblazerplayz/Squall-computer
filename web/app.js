@@ -2049,6 +2049,13 @@
     sfx: name => sfx(name),
     usage: () => usageForPhone(),
     setUsage: r => setUsageSettings(r),
+    routines: {
+      list: () => ((S.team && S.team.routines) || []).map(r => Object.assign({}, r, { off: routineOff(r.id) })),
+      save: (r, oldId, on) => phoneSaveRoutine(r, oldId, on),
+      remove: id => removeRoutine(id),
+      setOn: (id, on) => { setRoutineOn(id, on); routinesChanged(); },
+      skipToday: id => skipRoutineToday(id),
+    },
   });
   // Squall Uno (web/uno.js): each agent's own computer, live, in the sidebar under the chats and in the middle
   if (window.SquallUno) window.SquallUno.wire({
@@ -5025,15 +5032,78 @@
           '<span class="rt-pill' + (x.enabled ? '' : ' off') + '">' + (x.enabled ? 'On' : 'Off') + '</span></div>';
       }).join('') + '</div>' : '<div class="runs-none">The Claude app has no scheduled tasks.</div>');
   }
+  // Routines turned off (in the Routines list or from the phone) stay, but don't run. Which ones is kept on this computer.
+  var routinesOffMap = null;
+  function routinesOff() {
+    if (!routinesOffMap) { try { routinesOffMap = JSON.parse(localStorage.getItem('squall.routinesOff') || '{}') || {}; } catch (e) { routinesOffMap = {}; } }
+    return routinesOffMap;
+  }
+  function routineOff(id) { return !!routinesOff()[id]; }
+  function setRoutineOn(id, on) {
+    const m = routinesOff();
+    if (on) delete m[id]; else m[id] = true;
+    try { localStorage.setItem('squall.routinesOff', JSON.stringify(m)); } catch (e) { }
+  }
+  function routineDay(d) { const p = n => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
+  var routinesRerender = null;   // redraws the open Routines list (keeping a half-typed new routine) after a change from the phone
+  function routinesChanged() { if (routinesRerender) routinesRerender(); }
+  async function removeRoutine(id) {
+    const r = await Bridge.call('routineRemove', { id });
+    if (!S.team) S.team = {};
+    S.team.routines = r.routines;
+    setRoutineOn(id, true);
+    routinesChanged();
+  }
+  function skipRoutineToday(id) {
+    const r = ((S.team && S.team.routines) || []).find(x => x.id === id);
+    if (!r) return;
+    const today = routineDay(new Date());
+    r.lastRun = today;
+    Bridge.call('routineRan', { id, date: today }).catch(() => { });
+    routinesChanged();
+  }
+  // a routine saved on the phone: a new one is added; an edited one is added again with its changes and the old one removed
+  // (the host has no edit), keeping its on/off and, when the time didn't change, that it already ran today
+  async function phoneSaveRoutine(r, oldId, on) {
+    if (!S.team) S.team = {};
+    const old = oldId ? (S.team.routines || []).find(x => x.id === oldId) : null;
+    if (oldId && !old) throw new Error('That routine isn’t on the computer any more.');
+    const before = new Set((S.team.routines || []).map(x => x.id));
+    const added = await Bridge.call('routineAdd', Object.assign({}, r, { by: old ? (old.by || 'Storm') : 'Storm' }));
+    S.team.routines = added.routines;
+    const fresh = (S.team.routines || []).find(x => !before.has(x.id));
+    if (old) {
+      try {
+        const res = await Bridge.call('routineRemove', { id: old.id });
+        S.team.routines = res.routines;
+      } catch (e) {
+        // the old one is still there, so take the new copy away again: never two of the same routine
+        if (fresh) { try { const back = await Bridge.call('routineRemove', { id: fresh.id }); S.team.routines = back.routines; } catch (e2) { } }
+        routinesChanged();
+        throw e;
+      }
+      setRoutineOn(old.id, true);
+    }
+    if (fresh) {
+      setRoutineOn(fresh.id, on !== false);
+      const now = (S.team.routines || []).find(x => x.id === fresh.id);
+      if (old && old.lastRun && old.time === r.time && now) {
+        now.lastRun = old.lastRun;
+        Bridge.call('routineRan', { id: now.id, date: old.lastRun }).catch(() => { });
+      }
+    }
+    routinesChanged();
+  }
   function openRoutines() {
     closeModal();
     const box = document.createElement('div');
     box.className = 'modal-back';
+    routinesRerender = () => { if (!box.isConnected) { routinesRerender = null; return; } const keep = keepRoutineForm(box); render(); keep(); };
     const render = () => {
       const rs = (S.team && S.team.routines) || [];
       box.innerHTML = '<div class="modal add-modal routines-modal"><div class="set-head"><h3>Routines</h3><button class="set-x" data-t="close" title="Close">×</button></div>' +
-        '<div class="add-hint">A routine gives a bot a job at a set time: every day, on weekdays or at weekends. Squall runs it while it’s open. Bots can add routines too when you ask them.</div>' +
-        (rs.length ? '<div class="rt-list">' + rs.map(r => '<div class="rt-row"><div class="rt-main"><b>' + esc(r.name) + '</b><span>' + esc(r.bot) + ' · ' + esc(r.days) + ' at ' + esc(r.time) + (r.by && r.by !== 'Storm' ? ' · made by ' + esc(r.by) : '') + (r.lastRun ? ' · last ran ' + esc(r.lastRun) : '') + '</span><i>' + esc(String(r.prompt || '').slice(0, 160)) + '</i></div><button class="set-btn" data-rmrt="' + esc(r.id) + '">Remove</button></div>').join('') + '</div>'
+        '<div class="add-hint">A routine gives a bot a job at a set time: every day, on weekdays or at weekends. Squall runs it while it’s open. Turn one off to pause it, here or on your phone. Bots can add routines too when you ask them.</div>' +
+        (rs.length ? '<div class="rt-list">' + rs.map(r => { const off = routineOff(r.id); return '<div class="rt-row' + (off ? ' off' : '') + '"><div class="rt-main"><b>' + esc(r.name) + '</b><span>' + esc(r.bot) + ' · ' + esc(r.days) + ' at ' + esc(r.time) + (r.by && r.by !== 'Storm' ? ' · made by ' + esc(r.by) : '') + (r.lastRun ? ' · last ran ' + esc(r.lastRun) : '') + '</span><i>' + esc(String(r.prompt || '').slice(0, 160)) + '</i></div><button class="rt-pill rt-toggle' + (off ? ' off' : '') + '" data-rton="' + esc(r.id) + '" title="' + (off ? 'Off: it won’t run. Click to turn it on' : 'On: click to turn it off without removing it') + '">' + (off ? 'Off' : 'On') + '</button><button class="set-btn" data-rmrt="' + esc(r.id) + '">Remove</button></div>'; }).join('') + '</div>'
           : '<div class="runs-none">No routines yet.</div>') +
         appTasksHTML() +
         '<div class="rt-new"><div class="rt-new-h">New routine</div>' +
@@ -5049,10 +5119,12 @@
     Bridge.call('appTasks').then(ts => { S.appTasks = ts || []; if (box.isConnected) { const keep = keepRoutineForm(box); render(); keep(); } }).catch(() => { S.appTasks = []; });
     box.addEventListener('click', e => {
       if (e.target === box) { closeModal(); return; }
+      const tg = e.target.closest('[data-rton]');
+      if (tg) { const id = tg.dataset.rton; setRoutineOn(id, routineOff(id)); routinesChanged(); return; }
       const rm = e.target.closest('[data-rmrt]');
       if (rm) {
         if (!confirm('Remove this routine?')) return;
-        Bridge.call('routineRemove', { id: rm.dataset.rmrt }).then(r => { S.team.routines = r.routines; render(); }).catch(err => { box.querySelector('#rt-status').textContent = err.message; });
+        removeRoutine(rm.dataset.rmrt).catch(err => { box.querySelector('#rt-status').textContent = err.message; });
         return;
       }
       const t = e.target.closest('[data-t]');
@@ -5076,6 +5148,7 @@
     const d = at instanceof Date ? at : new Date(), pad = n => String(n).padStart(2, '0');
     const nowMin = d.getHours() * 60 + d.getMinutes(), today = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()), dow = d.getDay();
     for (const r of rs) {
+      if (routineOff(r.id)) continue;
       const hm = String(r.time || '').split(':').map(Number), rMin = hm[0] * 60 + hm[1];
       if (!(nowMin >= rMin && nowMin - rMin <= 5) || r.lastRun === today) continue;
       if (r.days === 'weekdays' && (dow === 0 || dow === 6)) continue;

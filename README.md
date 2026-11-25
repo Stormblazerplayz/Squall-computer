@@ -41,3 +41,12 @@ the pace lands, and the jobs each bot did today (Squall times its own runs, from
 Both the phone and the usage menu have **Slow the team down to save usage** (the throttle: short turns, no waking sleeping bots,
 fewer timer nudges) and **Also slow down at** a percent of the 5-hour window. Once set, the switch wins over `team.json`'s
 `throttle`. The phone changes them with the `usage.settings` action (`{"throttle": true}` or `{"limit": 80}` / `{"limit": null}`).
+
+## Routines on the phone
+
+Squall's routines (Routines tile: a bot gets a job at a set time, every day, on weekdays or at weekends) go to the phone in
+`state.routines` (see `web/link.js`, `phoneRoutines`), so the phone's **Routines** tab shows the real ones. From the phone you
+can add one, edit it, turn it on or off, skip today, or delete it (`routine.save`, `routine.toggle`, `routine.skip`,
+`routine.delete`). Each one carries `lastRun` (the day it last ran or was skipped), so the phone knows today's run is done. Squall runs routines on every day, weekdays or weekends, so a phone routine on other days is refused with a
+reason. Editing adds the changed routine and removes the old one (the host has no edit). **On / Off** also shows in the
+Routines list on the computer: an off routine stays but doesn't run (kept in `localStorage`, `squall.routinesOff`).

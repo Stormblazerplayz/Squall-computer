@@ -126,7 +126,7 @@ test('phone actions map to the right chat or approval', () => {
   assert.deepEqual(r.members, ['Quill', 'Nova']);
   assert.ok(L.routeAction(v, { type: 'group.create', name: 'Empty', members: [] }).error);
 
-  for (const t of ['bot.create', 'work.stop', 'routine.save', 'team.pause', 'claudeCode.update', '', undefined])
+  for (const t of ['bot.create', 'work.stop', 'team.pause', 'claudeCode.update', '', undefined])
     assert.equal(L.routeAction(v, { type: t }).error, 'Squall on the computer can’t do that yet.');
 });
 

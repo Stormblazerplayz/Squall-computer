@@ -2,7 +2,7 @@
 //
 // The host's SquallLink (src/SquallLink) runs the phone API from Squall-mobile docs/pairing.md. This file is the window's half:
 //   - every 2 seconds it hands the host the phone's view of the team (bots, chats, groups, approvals), built from Squall's
-//     real state: nothing here is made up, and what Squall doesn't have (routines, jobs) is simply left out;
+//     real state: nothing here is made up, and what Squall doesn't have (jobs) is simply left out;
 //   - that includes the shared To do list (Doing now, Next, Done), which the phone can add to, tick off, give to a bot or clear;
 //   - it answers the phone's actions and voice turns, which the host forwards as "linkAsk" events;
 //   - it adds "Squall app (iPhone and iPad)" to Settings, with Pair a phone (a QR code and a 6-digit code) and Unpair.
@@ -105,6 +105,9 @@
     // the plan's usage and today's jobs, for the phone's Plan usage screen (only when Squall has it)
     const usage = phoneUsage(view && view.usage, idOf, view && view.now);
     if (usage) state.usage = usage;
+    // Squall's routines (jobs a bot does at a set time), for the phone's Routines tab (only when Squall sends them)
+    const routines = phoneRoutines(view && view.routines, idOf);
+    if (routines) state.routines = routines;
     // Squall's own version, for the phone's Settings > Computer (only what the updater really knows)
     const d = view && view.desktop;
     if (d && d.current) {
@@ -250,6 +253,45 @@
     }).filter(m => m.text.trim() || m.kind !== 'bot');
   }
 
+  // ---------------------------------------------------------------- routines
+
+  // The days each of Squall's repeats runs on, Monday first (the phone's order).
+  const DAY_SETS = { daily: [1, 1, 1, 1, 1, 1, 1], weekdays: [1, 1, 1, 1, 1, 0, 0], weekends: [0, 0, 0, 0, 0, 1, 1] };
+  const pad2 = n => String(n).padStart(2, '0');
+
+  // rs: Squall's routines [{ id, name, bot, prompt, time: "HH:MM", days: daily | weekdays | weekends, off }]. Returns the phone's
+  // routines, or null when Squall didn't send any. A routine whose bot has left the team is left out. The phone's extra switches
+  // (ping when done, ask before pushing, skip if busy) aren't Squall's, so they're sent as the phone's own defaults.
+  function phoneRoutines(rs, idOf) {
+    if (!Array.isArray(rs)) return null;
+    return rs.filter(r => r && r.id && idOf(r.bot)).map(r => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(String(r.time || '').trim());
+      const minutes = m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : 9 * 60;
+      const days = DAY_SETS[r.days] ? r.days : 'daily';
+      const out = {
+        id: String(r.id), botId: idOf(r.bot), task: String(r.prompt || r.name || '').slice(0, 4000),
+        repeat: days === 'weekends' ? 'custom' : days, days: DAY_SETS[days].map(Boolean), minutes,
+        isOn: !r.off, pingWhenDone: true, askBeforePush: true, skipIfBusy: false,
+      };
+      // the day it last ran (or was skipped), "YYYY-MM-DD" on the computer's clock: it doesn't run again that day
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(r.lastRun || ''))) out.lastRun = String(r.lastRun);
+      return out;
+    });
+  }
+
+  // The phone's repeat and days as one of Squall's: 'daily', 'weekdays', 'weekends', '' for no days, or null when Squall can't run it.
+  function routineDays(r) {
+    if (r.repeat === 'daily' || r.repeat === 'weekdays') return r.repeat;
+    const d = Array.isArray(r.days) && r.days.length === 7 ? r.days.map(x => (x === true ? 1 : 0)).join('') : null;
+    if (d === null) return null;
+    if (d === '0000000') return '';
+    return Object.keys(DAY_SETS).find(k => DAY_SETS[k].join('') === d) || null;
+  }
+
+  function routineFor(view, id) {
+    return ((view && view.routines) || []).find(r => r && String(r.id) === String(id)) || null;
+  }
+
   // ---------------------------------------------------------------- actions from the phone
 
   // Finds Squall's chat for the phone's chat id (a bot id, "team" or a group id).
@@ -326,6 +368,42 @@
         }
         if (!('throttle' in out) && !('limit' in out)) return { error: 'There’s nothing to change.' };
         return out;
+      }
+      case 'routine.save': {
+        // the phone's routine editor: { routine: { id, botId, task, repeat, days[7], minutes, isOn, ... } }. A new id makes a new routine.
+        const r = a.routine && typeof a.routine === 'object' ? a.routine : null;
+        if (!r) return { error: 'There’s nothing to save.' };
+        const bot = nameFor(view, r.botId);
+        if (!bot) return { error: 'That bot isn’t on the computer any more.' };
+        const task = String(r.task || '').trim();
+        if (!task) return { error: 'Say what the routine should do.' };
+        const min = Number(r.minutes);
+        if (!Number.isInteger(min) || min < 0 || min >= 1440) return { error: 'Pick a time for the routine.' };
+        const days = routineDays(r);
+        if (days === '') return { error: 'Pick at least one day.' };
+        if (!days) return { error: 'Squall on the computer runs routines every day, on weekdays or at weekends.' };
+        const old = routineFor(view, r.id);
+        const first = task.split('\n')[0].trim();
+        const name = old && String(old.prompt || '').trim() === task && old.name ? old.name : (first.length > 40 ? first.slice(0, 39).trimEnd() + '…' : first);
+        return {
+          do: 'routineSave', oldId: old ? old.id : null, isOn: r.isOn !== false,
+          routine: { name, bot, prompt: task.slice(0, 4000), time: pad2(Math.floor(min / 60)) + ':' + pad2(min % 60), days },
+        };
+      }
+      case 'routine.toggle': {
+        const rt = routineFor(view, a.routineId);
+        if (!rt) return { error: 'That routine isn’t on the computer any more.' };
+        if (typeof a.isOn !== 'boolean') return { error: 'A routine has to be on or off.' };
+        return { do: 'routineOn', id: rt.id, on: a.isOn };
+      }
+      case 'routine.delete': {
+        const rt = routineFor(view, a.routineId);
+        return rt ? { do: 'routineDelete', id: rt.id } : { do: 'none' };
+      }
+      case 'routine.skip': {
+        const rt = routineFor(view, a.routineId);
+        if (!rt) return { error: 'That routine isn’t on the computer any more.' };
+        return { do: 'routineSkip', id: rt.id };
       }
       default: return { error: CANT };
     }
@@ -409,6 +487,7 @@
         desktop: status.update || null,
         todo: h.todo ? h.todo.items() : undefined,
         usage: h.usage ? h.usage() : null,
+        routines: h.routines ? h.routines.list() : undefined,
         now: Date.now(),
       };
     }
@@ -481,6 +560,16 @@
           if ('throttle' in r) change.throttle = r.throttle;
           if ('limit' in r) change.limit = r.limit;
           h.setUsage(change);
+          await pushNow();
+          return { ok: true };
+        }
+        case 'routineSave': case 'routineOn': case 'routineDelete': case 'routineSkip': {
+          const rt = h.routines;
+          if (!rt) return { ok: false, error: CANT };
+          if (r.do === 'routineSave') await rt.save(r.routine, r.oldId, r.isOn);
+          else if (r.do === 'routineOn') rt.setOn(r.id, r.on);
+          else if (r.do === 'routineDelete') await rt.remove(r.id);
+          else rt.skipToday(r.id);
           await pushNow();
           return { ok: true };
         }
@@ -645,7 +734,7 @@
     root.SquallLinkUI = { settingsHTML, onSettings, openPair, refresh, push };
   }
 
-  const api = { CHIEF, botIds, hash, buildState, phoneMessages, phoneTodo, giveText, phoneUsage, windowId, routeAction, chatFor, speakable, wire };
+  const api = { CHIEF, botIds, hash, buildState, phoneMessages, phoneTodo, giveText, phoneUsage, phoneRoutines, windowId, routeAction, chatFor, speakable, wire };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.SquallLinkCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
